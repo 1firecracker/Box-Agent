@@ -3,7 +3,9 @@
 Provides unified configuration loading and management functionality
 """
 
+import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -760,6 +762,13 @@ class Config(BaseModel):
 
     @classmethod
     def find_config_file(cls, filename: str) -> Path | None:
+        path = cls._find_config_file(filename)
+        if path is not None and filename in PROMPT_TEMPLATE_FILES:
+            _warn_prompt_override_drift(path, filename)
+        return path
+
+    @classmethod
+    def _find_config_file(cls, filename: str) -> Path | None:
         """Find configuration file with priority order
 
         Search for config file in the following order of priority:
@@ -852,3 +861,58 @@ class Config(BaseModel):
             )
 
         return target
+
+
+# Prompt templates a user may override in ~/.box-agent/config (or BOX_AGENT_HOME).
+PROMPT_TEMPLATE_FILES = ("system_prompt.md", "analysis_prompt.md", "code_prompt.md")
+_PROMPT_PLACEHOLDER = re.compile(r"\{[A-Z][A-Z_]{2,}\}|\{\{\.[A-Za-z]+\}\}")
+_warned_prompt_overrides: set[tuple[str, int]] = set()
+
+
+def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
+    """Compare a prompt template override with the packaged one.
+
+    Placeholders are how the session builder injects version-specific,
+    capability-gated sections. An override copied from an older release lacks
+    new placeholders (those sections silently stay stale) or carries ones this
+    version no longer fills (they would leak verbatim into the prompt).
+    Returns ``None`` when ``path`` is the packaged file or matches it.
+    """
+    bundled = Config.get_package_dir() / "config" / filename
+    try:
+        if not bundled.is_file() or path.resolve() == bundled.resolve():
+            return None
+        expected = set(_PROMPT_PLACEHOLDER.findall(bundled.read_text(encoding="utf-8")))
+        actual = set(_PROMPT_PLACEHOLDER.findall(path.read_text(encoding="utf-8")))
+    except OSError:
+        return None
+    missing, unknown = sorted(expected - actual), sorted(actual - expected)
+    if not missing and not unknown:
+        return None
+    return {"path": str(path), "bundled": str(bundled), "missing": missing, "unknown": unknown}
+
+
+def _warn_prompt_override_drift(path: Path, filename: str) -> None:
+    """Warn once per override file version; never change which file is used."""
+    try:
+        key = (str(path.resolve()), path.stat().st_mtime_ns)
+    except OSError:
+        return
+    if key in _warned_prompt_overrides:
+        return
+    _warned_prompt_overrides.add(key)
+    drift = prompt_override_drift(path, filename)
+    if drift is None:
+        return
+    parts = []
+    if drift["missing"]:
+        parts.append(f"missing {', '.join(drift['missing'])}")
+    if drift["unknown"]:
+        parts.append(f"unknown {', '.join(drift['unknown'])}")
+    # stderr only: ACP reserves stdout for protocol frames.
+    print(
+        f"[box-agent] warning: prompt override {path} differs from this version's {filename} "
+        f"({'; '.join(parts)}); it was probably copied from an older release. "
+        f"Update it from {drift['bundled']} or delete it to use the packaged prompt.",
+        file=sys.stderr,
+    )

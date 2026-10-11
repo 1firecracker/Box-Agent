@@ -1526,6 +1526,23 @@ def _doctor_check_obsidian() -> None:
     print(_doctor_obsidian_status_line())
 
 
+def _doctor_prompt_status() -> dict[str, Any]:
+    """Report prompt template overrides that drifted from this version."""
+    from box_agent.config import PROMPT_TEMPLATE_FILES, prompt_override_drift
+
+    drifted = []
+    for filename in PROMPT_TEMPLATE_FILES:
+        path = Config._find_config_file(filename)
+        drift = prompt_override_drift(path, filename) if path is not None else None
+        if drift is not None:
+            drifted.append({"file": filename, **drift})
+    if not drifted:
+        return _doctor_check("ok", "packaged prompt templates in use (or overrides up to date)")
+    names = ", ".join(f"{item['path']} (missing {len(item['missing'])}, unknown {len(item['unknown'])})"
+                      for item in drifted)
+    return _doctor_check("warning", f"outdated prompt override: {names}", overrides=drifted)
+
+
 def _doctor_config_status() -> tuple[dict[str, Any], Config | None]:
     config_path = Config.find_config_file("config.yaml")
     config = None
@@ -1628,6 +1645,10 @@ async def cmd_doctor(json_output: bool = False) -> int:
     checks["config"], config = _doctor_config_status()
     if not json_output:
         print(_doctor_line("Config", checks["config"]))
+
+    checks["prompts"] = _doctor_prompt_status()
+    if not json_output:
+        print(_doctor_line("Prompts", checks["prompts"]))
 
     checks["api"] = await _doctor_api_status(config)
     if not json_output:
