@@ -182,6 +182,12 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
                 or run.get("input_consistency", {}).get("status") != "matched"):
             result["reason"] = "incomplete or inconsistent capture"
             return result
+        details = (run.get("response_metadata") or {}).get("errorDetails") or {}
+        if run.get("acp_status") == "error" and details.get("source") == "llm_provider":
+            # A provider/network failure (e.g. HTTP 499/5xx) says nothing about
+            # the prompt or agent; never count it as a task failure in A/B.
+            result["reason"] = f"model provider error: {details.get('httpStatus') or details.get('code')}"
+            return result
         records = trace_records(attempt)
         result["requests"] = request_inventory(records)
         if not result["requests"]:
@@ -282,6 +288,8 @@ def _side(directories: list[Path], pack: Path) -> dict[str, dict]:
                 "passed": 0, "failed": 0, "unverified": 0, "tokens": [], "tool_calls": [], "failed_tool_calls": [],
             })
             row[result["quality"]] += 1
+            if result["quality"] == "unverified":
+                continue  # partial runs (provider errors, timeouts) would skew cost
             tokens = _total_tokens(result.get("token_usage"))
             if tokens is not None:
                 row["tokens"].append(tokens)
@@ -294,8 +302,10 @@ def _side(directories: list[Path], pack: Path) -> dict[str, dict]:
 def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK) -> dict:
     """Per-case pass counts and mean cost for two groups of repeated runs.
 
-    A regression is any case whose candidate pass rate is lower than the
-    baseline's; unverified attempts count as not passed on both sides.
+    Pass rate is over verified attempts (passed + failed); unverified ones
+    (provider errors, timeouts, incomplete capture) are reported separately so
+    infrastructure noise neither hides nor fakes a regression. A regression is
+    any case whose candidate pass rate is lower than the baseline's.
     """
     before, after = _side(baseline, pack), _side(candidate, pack)
     mean = lambda values: round(sum(values) / len(values), 1) if values else None
@@ -305,9 +315,9 @@ def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK)
         for label, side in (("baseline", before), ("candidate", after)):
             row = side.get(case_id, {"passed": 0, "failed": 0, "unverified": 0,
                                      "tokens": [], "tool_calls": [], "failed_tool_calls": []})
-            attempts = row["passed"] + row["failed"] + row["unverified"]
-            rows[label] = {"passed": row["passed"], "attempts": attempts,
-                           "pass_rate": row["passed"] / attempts if attempts else None,
+            verified = row["passed"] + row["failed"]
+            rows[label] = {"passed": row["passed"], "verified": verified, "unverified": row["unverified"],
+                           "pass_rate": row["passed"] / verified if verified else None,
                            "mean_tokens": mean(row["tokens"]), "mean_tool_calls": mean(row["tool_calls"]),
                            "mean_failed_tool_calls": mean(row["failed_tool_calls"])}
         cases.append({"case_id": case_id, **rows})
@@ -318,13 +328,14 @@ def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK)
 
 
 def render_comparison(report: dict) -> str:
-    lines = ["| case | baseline pass | candidate pass | baseline tokens | candidate tokens "
-             "| baseline tool calls (failed) | candidate tool calls (failed) |",
+    lines = ["| case | baseline pass (unverified) | candidate pass (unverified) | baseline tokens "
+             "| candidate tokens | baseline tool calls (failed) | candidate tool calls (failed) |",
              "|---|---|---|---|---|---|---|"]
     for case in report["cases"]:
         b, c = case["baseline"], case["candidate"]
         lines.append(
-            f"| {case['case_id']} | {b['passed']}/{b['attempts']} | {c['passed']}/{c['attempts']} "
+            f"| {case['case_id']} | {b['passed']}/{b['verified']} ({b['unverified']}) "
+            f"| {c['passed']}/{c['verified']} ({c['unverified']}) "
             f"| {b['mean_tokens']} | {c['mean_tokens']} "
             f"| {b['mean_tool_calls']} ({b['mean_failed_tool_calls']}) "
             f"| {c['mean_tool_calls']} ({c['mean_failed_tool_calls']}) |"

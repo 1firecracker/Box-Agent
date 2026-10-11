@@ -294,4 +294,26 @@ def test_compare_reports_per_case_pass_rates_and_regressions(tmp_path, monkeypat
     assert rows["r-a"]["baseline"]["passed"] == 1 and rows["r-a"]["candidate"]["passed"] == 3
     assert rows["r-a"]["baseline"]["mean_tokens"] == 233.3
     assert report["regressions"] == ["r-b"]
-    assert "| r-a | 1/3 | 3/3 |" in baseline.render_comparison(report)
+    assert "| r-a | 1/3 (0) | 3/3 (0) |" in baseline.render_comparison(report)
+
+
+def test_model_provider_errors_are_unverified_not_failed(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={
+        "runStatus": "error", "errorDetails": {"source": "llm_provider", "httpStatus": 499},
+    })
+    write_json(attempt / "run.json", run)
+
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+
+    assert result["quality"] == "unverified"
+    assert result["reason"] == "model provider error: 499"
+
+
+def test_agent_errors_still_fail(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={"errorDetails": {"source": "tool"}})
+    write_json(attempt / "run.json", run)
+    write_json(attempt / "workspace/result.json", 391)
+
+    assert baseline.evaluate_attempt(attempt, completion_spec())["quality"] == "failed"
