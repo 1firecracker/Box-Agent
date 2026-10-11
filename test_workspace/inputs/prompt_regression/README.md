@@ -21,7 +21,8 @@ are preserved unless explicitly listed in `mutable_inputs`.
 The JSONL oracle preserves the selected record text, allowing a final newline
 but rejecting reformatting of JSON. The image oracle requires a valid nonempty `cat.png`. The arithmetic fixture is
 checked structurally: `add(a, b)` must return `a + b`, and `multiply(a, b)` must
-return `a * b`, with no extra executable module statements. This deliberately
+return `a * b`, with no extra executable module statements or defaults,
+annotations, or decorators on any module function. This deliberately
 narrow oracle does not execute model-generated Python and may reject equivalent
 rewrites outside the requested minimal bug fix.
 

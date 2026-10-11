@@ -374,6 +374,38 @@ def test_git_dirty_oracle_checks_both_functions(attempt, content, expected):
     assert all(baseline.check_rule(r, attempt, []) for r in checks) is expected
 
 
+@pytest.mark.parametrize("header,extra", [
+    ("def add(a: Number, b: Number):", ""),
+    ("def add(a, b) -> Number:", ""),
+    ("def add(a=missing, b=0):", ""),
+    ("def add(a, b):", "@missing\ndef helper():\n    return 0\n"),
+    ("def add(a, b):", "def helper(a=missing):\n    return 0\n"),
+    ("def add(a, b):", "def helper(*, a=missing):\n    return 0\n"),
+    ("def add(a, b):", "def helper(*args: Number, **kwargs: Number):\n    return 0\n"),
+    ("def add(a=missing, b=0):", "def add(a, b):\n    return a + b\n"),
+])
+def test_git_dirty_oracle_rejects_import_time_expressions(attempt, header, extra):
+    import hashlib
+    record = next(json.loads(line) for line in (REGRESSION_PACK / "dataset.jsonl").read_text().splitlines()
+                  if json.loads(line)["id"] == "r-git-dirty")
+    write_json(attempt.parent.parent / "input.json", record)
+    before = []
+    for name in [*record["workspace_setup"]["files"], *record["workspace_setup"]["dirty_files"]]:
+        content = (REGRESSION_PACK / name).read_bytes()
+        (attempt / "workspace" / name).write_bytes(content)
+        before.append({"path": name, "sha256": hashlib.sha256(content).hexdigest()})
+    write_json(attempt / "files-before.json", {"files": before})
+    (attempt / "workspace/calc.py").write_text(
+        header + "\n    return a + b\n\ndef multiply(a, b):\n    return a * b\n\n" + extra,
+        encoding="utf-8",
+    )
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-git-dirty")
+    result = baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)
+    assert result["quality"] == "failed"
+    assert not all(result["checks"])
+
+
 def test_image_oracle_requires_a_valid_png(attempt):
     from PIL import Image
     spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]

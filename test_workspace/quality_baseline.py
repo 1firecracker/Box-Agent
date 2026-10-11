@@ -151,9 +151,19 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
                 and isinstance(node.value.value, str)
             ) for node in module.body):
                 return False
-            functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+            definitions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
+            for definition in definitions:
+                # These expressions run when any function is defined, even a
+                # helper that is not selected by this arithmetic check.
+                if (definition.decorator_list or definition.returns is not None
+                        or definition.args.defaults
+                        or any(value is not None for value in definition.args.kw_defaults)
+                        or any(isinstance(arg, ast.arg) and arg.annotation is not None
+                               for arg in ast.walk(definition.args))):
+                    return False
+            functions = {node.name: node for node in definitions}
             function = functions.get(rule["name"])
-            if function is None or function.decorator_list:
+            if function is None:
                 return False
             parameters = [arg.arg for arg in [*function.args.posonlyargs, *function.args.args]]
             body = function.body
