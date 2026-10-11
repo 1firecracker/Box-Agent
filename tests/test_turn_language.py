@@ -1,0 +1,59 @@
+"""Deliverable-language hint: only for clearly non-Chinese requests."""
+
+import pytest
+
+from box_agent.turn_language import deliverable_language_hint, request_language, with_deliverable_language_hint
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Write a short product blurb based on product.md and save it as blurb.md.", "English"),
+    ("Please summarize the attached report into three bullet points for the board.", "English"),
+    ("帮我写一段产品介绍，存成 intro.md。", None),
+    ("把 report.md 翻译成英文 summary，存成 summary_en.md。", None),
+    ("ok", None),
+    ("continue", None),
+    ("OK继续", None),
+    ("`src/box_agent/very/long/path/name.py` ```print('hello world from code')``` 修一下", None),
+    ("product.md をもとに短い紹介文を書いて blurb.md に保存してください。", "Japanese"),
+])
+def test_request_language(text, expected):
+    assert request_language(text) == expected
+
+
+def test_hint_only_for_non_chinese_and_appended_after_the_request():
+    assert deliverable_language_hint("帮我写一段产品介绍") is None
+    english = "Write a short product blurb based on product.md and save it as blurb.md."
+    message = with_deliverable_language_hint(english)
+    assert message.startswith(english)
+    assert message.endswith("unless the user asks for a specific language.]")
+    assert with_deliverable_language_hint("帮我写一段产品介绍") == "帮我写一段产品介绍"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,hinted", [
+    ("Write a short product blurb based on product.md and save it as blurb.md.", True),
+    ("根据 product.md 写一段产品介绍，存成 intro.md。", False),
+])
+async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hinted):
+    """Real ACP turn: hint follows the user's words; host's English prefixes do not trigger it."""
+    from types import SimpleNamespace
+
+    from box_agent.acp import BoxACPAgent
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from tests.test_acp import _EMPTY_CONNECTOR_CONTEXT, CaptureMessagesLLM, DummyConn
+
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}],
+                                       field_meta={"ui_language": "zh"}))
+
+    [user_message] = [content for role, content in llm.calls[0] if role == "user"]
+    assert user_message.startswith("[Host UI language: Chinese.")
+    assert user_message.endswith(_EMPTY_CONNECTOR_CONTEXT)
+    assert ("[Deliverable language: English." in user_message) is hinted
+    if hinted:
+        assert user_message.index(text) < user_message.index("[Deliverable language")
