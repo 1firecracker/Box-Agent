@@ -8,6 +8,7 @@ import json
 import os
 import platform
 from pathlib import Path
+import re
 import subprocess
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
@@ -36,7 +37,7 @@ def contained(root: Path, relative: str) -> Path:
     return path
 
 
-def source_identity() -> dict:
+def source_identity(pack: Path = PACK) -> dict:
     files = subprocess.check_output(
         ["git", "ls-files", "box_agent", "uv.lock"], cwd=ROOT, text=True,
     ).splitlines()
@@ -49,8 +50,8 @@ def source_identity() -> dict:
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "source_sha256": digest(hashes), "source_files": hashes,
         "oracle_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "pack_sha256": digest({p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                               for p in sorted(PACK.iterdir()) if p.is_file()}),
+        "pack_sha256": digest({str(p.relative_to(pack)): hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in sorted(pack.rglob("*")) if p.is_file()}),
         "python": platform.python_version(), "platform": platform.platform(),
         "profile_config_sha256": config_hash,
         "environment": {key: os.environ.get(key) for key in
@@ -114,6 +115,18 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
                    for index, call in enumerate(calls))
     if kind == "no_tool":
         return not any(call.get("tool_name") in rule["names"] for call in calls)
+    if kind == "tool_args_not_matching":
+        # e.g. no bash command that commits or discards the user's git work.
+        pattern = re.compile(rule["pattern"], re.IGNORECASE)
+        return not any(call.get("tool_name") == rule["name"]
+                       and pattern.search(str(call.get("arguments", {}).get(rule["argument"], "")))
+                       for call in calls)
+    if kind == "reply_contains":
+        reply = attempt / "assistant.txt"
+        return reply.is_file() and rule["value"] in reply.read_text(encoding="utf-8")
+    if kind == "no_unknown_tool":
+        # The prompt must not lead the model to call tools the session lacks.
+        return not any("Unknown tool" in str(call.get("error", "")) for call in calls)
     path = contained(attempt / "workspace", rule["path"])
     if kind == "absent":
         return not path.exists()
@@ -123,6 +136,8 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
         return json.loads(path.read_text(encoding="utf-8")) == rule["value"]
     if kind == "text":
         return path.read_text(encoding="utf-8").strip() == rule["value"]
+    if kind == "contains":
+        return rule["value"] in path.read_text(encoding="utf-8")
     if kind == "xlsx":
         ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         with ZipFile(path) as archive:
@@ -147,7 +162,7 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
     raise ValueError(f"unknown oracle: {kind}")
 
 
-def evaluate_attempt(attempt: Path, spec: dict) -> dict:
+def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
     result = {"case_id": spec["id"], "split": spec["split"], "attempt": attempt.name,
               "quality": "unverified", "checks": [], "latency_seconds": None,
               "token_usage": None, "cost": None, "cost_reason": "no verified price/billing source"}
@@ -183,10 +198,10 @@ def evaluate_attempt(attempt: Path, spec: dict) -> dict:
         fingerprints = {entry["path"]: entry.get("sha256") for entry in before["files"]}
         input_record = read_json(attempt.parent.parent / "input.json")
         for name in input_record["input_files"]:
-            expected = hashlib.sha256(contained(PACK, name).read_bytes()).hexdigest()
+            expected = hashlib.sha256(contained(pack, name).read_bytes()).hexdigest()
             if fingerprints.get(Path(name).name) != expected:
                 raise ValueError("input bytes differ from task pack")
-            if spec["id"] != "q0-file":
+            if spec["id"] != "q0-file" and name not in spec.get("mutable_inputs", []):
                 actual = hashlib.sha256(contained(attempt / "workspace", Path(name).name).read_bytes()).hexdigest()
                 if actual != expected:
                     result["quality"] = "failed"
@@ -211,8 +226,8 @@ def evaluate_attempt(attempt: Path, spec: dict) -> dict:
     return result
 
 
-def evaluate_run(directory: Path) -> dict:
-    specs = read_json(PACK / "oracles.json")["cases"]
+def evaluate_run(directory: Path, pack: Path = PACK) -> dict:
+    specs = read_json(pack / "oracles.json")["cases"]
     selection = read_json(directory / "selection.json")
     selected = selection["case_ids"]
     known = {spec["id"] for spec in specs}
@@ -236,16 +251,87 @@ def evaluate_run(directory: Path) -> dict:
                 results.append({"case_id": spec["id"], "quality": "unverified", "reason": "missing or invalid task evidence"})
                 continue
             expected_input = next(json.loads(line) for line in
-                                  (PACK / "dataset.jsonl").read_text(encoding="utf-8").splitlines()
+                                  (pack / "dataset.jsonl").read_text(encoding="utf-8").splitlines()
                                   if json.loads(line)["id"] == spec["id"])
             if actual_input != expected_input:
                 results.append({"case_id": spec["id"], "quality": "unverified", "reason": "task differs from baseline"})
             else:
-                results.append(evaluate_attempt(attempt, spec))
+                results.append(evaluate_attempt(attempt, spec, pack))
     return {"schema_version": VERSION, "evidence_kind": "real_model_acp_capture_or_unverified",
             "oracle_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "results": results, "counts": {status: sum(r["quality"] == status for r in results)
                                             for status in ("passed", "failed", "unverified")}}
+
+
+def _total_tokens(usage: object) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    for key in ("totalTokens", "total_tokens"):
+        if isinstance(usage.get(key), int):
+            return usage[key]
+    parts = [usage.get(key) for key in ("inputTokens", "outputTokens", "input_tokens", "output_tokens")]
+    numbers = [part for part in parts if isinstance(part, int)]
+    return sum(numbers) if numbers else None
+
+
+def _side(directories: list[Path], pack: Path) -> dict[str, dict]:
+    per_case: dict[str, dict] = {}
+    for directory in directories:
+        for result in evaluate_run(directory.resolve(), pack)["results"]:
+            row = per_case.setdefault(result["case_id"], {
+                "passed": 0, "failed": 0, "unverified": 0, "tokens": [], "tool_calls": [], "failed_tool_calls": [],
+            })
+            row[result["quality"]] += 1
+            tokens = _total_tokens(result.get("token_usage"))
+            if tokens is not None:
+                row["tokens"].append(tokens)
+            for key in ("tool_calls", "failed_tool_calls"):
+                if isinstance(result.get(key), int):
+                    row[key].append(result[key])
+    return per_case
+
+
+def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK) -> dict:
+    """Per-case pass counts and mean cost for two groups of repeated runs.
+
+    A regression is any case whose candidate pass rate is lower than the
+    baseline's; unverified attempts count as not passed on both sides.
+    """
+    before, after = _side(baseline, pack), _side(candidate, pack)
+    mean = lambda values: round(sum(values) / len(values), 1) if values else None
+    cases = []
+    for case_id in sorted(set(before) | set(after)):
+        rows = {}
+        for label, side in (("baseline", before), ("candidate", after)):
+            row = side.get(case_id, {"passed": 0, "failed": 0, "unverified": 0,
+                                     "tokens": [], "tool_calls": [], "failed_tool_calls": []})
+            attempts = row["passed"] + row["failed"] + row["unverified"]
+            rows[label] = {"passed": row["passed"], "attempts": attempts,
+                           "pass_rate": row["passed"] / attempts if attempts else None,
+                           "mean_tokens": mean(row["tokens"]), "mean_tool_calls": mean(row["tool_calls"]),
+                           "mean_failed_tool_calls": mean(row["failed_tool_calls"])}
+        cases.append({"case_id": case_id, **rows})
+    regressions = [case["case_id"] for case in cases
+                   if (case["baseline"]["pass_rate"] or 0) > (case["candidate"]["pass_rate"] or 0)]
+    return {"pack": str(pack), "baseline_runs": [str(p) for p in baseline],
+            "candidate_runs": [str(p) for p in candidate], "cases": cases, "regressions": regressions}
+
+
+def render_comparison(report: dict) -> str:
+    lines = ["| case | baseline pass | candidate pass | baseline tokens | candidate tokens "
+             "| baseline tool calls (failed) | candidate tool calls (failed) |",
+             "|---|---|---|---|---|---|---|"]
+    for case in report["cases"]:
+        b, c = case["baseline"], case["candidate"]
+        lines.append(
+            f"| {case['case_id']} | {b['passed']}/{b['attempts']} | {c['passed']}/{c['attempts']} "
+            f"| {b['mean_tokens']} | {c['mean_tokens']} "
+            f"| {b['mean_tool_calls']} ({b['mean_failed_tool_calls']}) "
+            f"| {c['mean_tool_calls']} ({c['mean_failed_tool_calls']}) |"
+        )
+    lines.append("")
+    lines.append(f"regressions: {', '.join(report['regressions']) or 'none'}")
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -256,14 +342,25 @@ def main(argv: list[str] | None = None) -> int:
     models.add_argument("--model")
     models.add_argument("--catalog-model")
     run.add_argument("--case-id", action="append", required=True)
+    run.add_argument("--pack", type=Path, default=PACK)
     check = sub.add_parser("check")
     check.add_argument("run_dir", type=Path)
+    check.add_argument("--pack", type=Path, default=PACK)
+    compare = sub.add_parser("compare", help="pass rates of baseline vs candidate runs per case")
+    compare.add_argument("--pack", type=Path, default=PACK)
+    compare.add_argument("--baseline", type=Path, nargs="+", required=True)
+    compare.add_argument("--candidate", type=Path, nargs="+", required=True)
     args = parser.parse_args(argv)
+    pack = args.pack.resolve()
+    if args.command == "compare":
+        report = compare_runs(args.baseline, args.candidate, pack)
+        print(render_comparison(report))
+        return 0 if not report["regressions"] else 1
     if args.command == "run":
         from test_workspace import run_acp_eval
         title = f"q0-{uuid4().hex[:8]}"
-        identity = source_identity()
-        arguments = ["--dataset", str(PACK / "dataset.jsonl"), "--title", title,
+        identity = source_identity(pack)
+        arguments = ["--dataset", str(pack / "dataset.jsonl"), "--title", title,
                      "--timeout-seconds", "180", "--parallelism", "1", "--seed", "13"]
         if args.catalog_model:
             catalog = read_json(ROOT / "test_workspace/evaluation_models.json")
@@ -300,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         (directory / "baseline-context.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
     else:
         directory = args.run_dir.resolve()
-    report = evaluate_run(directory)
+    report = evaluate_run(directory, pack)
     target = directory / f"quality-{uuid4().hex[:8]}.json"
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"report": str(target), "counts": report["counts"]}, ensure_ascii=False))

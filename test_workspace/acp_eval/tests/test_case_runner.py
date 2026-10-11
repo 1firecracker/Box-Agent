@@ -1058,3 +1058,59 @@ def test_model_metadata_and_staged_attachments_reach_the_same_acp_session(tmp_pa
     staged = attempt / "workspace" / "payload.txt"
     assert attachment["uri"] == staged.resolve().as_uri()
     assert staged.read_bytes() == b"input body\n"
+
+
+def test_session_mode_reaches_acp_and_rejects_unknown_modes(tmp_path: Path) -> None:
+    from acp_eval.models import CaseMetadata
+
+    config = make_config(tmp_path, "normal")
+    record = {"id": "normal", "query": "execute normal", "input_files": [],
+              "session_meta": {"session_mode": "code_agent"}}
+
+    run_case(record, config)
+
+    attempt = next((config.evaluation_dir / "cases/normal/attempts").iterdir())
+    sent = [entry["message"] for entry in read_jsonl(attempt / "protocol.jsonl") if entry["direction"] == "sent"]
+    session = next(message["params"] for message in sent if message.get("method") == "session/new")
+    assert session["_meta"]["session_mode"] == "code_agent"
+    with pytest.raises(ValueError, match="session_mode"):
+        CaseMetadata.from_record({"session_meta": {"session_mode": "ppt"}})
+
+
+@pytest.mark.skipif(case_runner_module.shutil.which("git") is None, reason="git is not installed")
+def test_workspace_setup_stages_a_git_baseline_with_dirty_user_work(tmp_path: Path) -> None:
+    import subprocess
+
+    config = make_config(tmp_path, "normal")
+    for name, body in {"app.py": "x = 1\n", "NOTES.md": "draft\n"}.items():
+        (config.dataset_root / name).write_text(body, encoding="utf-8")
+    record = {"id": "normal", "query": "execute normal", "input_files": [],
+              "workspace_setup": {"files": ["app.py"], "git_commit": True, "dirty_files": ["NOTES.md"]}}
+
+    run_case(record, config)
+
+    attempt = next((config.evaluation_dir / "cases/normal/attempts").iterdir())
+    workspace = attempt / "workspace"
+    status = subprocess.run(["git", "status", "--short"], cwd=workspace, capture_output=True, text=True, check=True)
+    lines = status.stdout.splitlines()
+    assert "?? NOTES.md" in lines  # uncommitted user work
+    assert not any(line.endswith("app.py") for line in lines)  # committed baseline is clean
+    committed = subprocess.run(["git", "ls-files"], cwd=workspace, capture_output=True, text=True, check=True)
+    assert committed.stdout.split() == ["app.py"]
+    sent = [entry["message"] for entry in read_jsonl(attempt / "protocol.jsonl") if entry["direction"] == "sent"]
+    prompt = next(message["params"] for message in sent if message.get("method") == "session/prompt")
+    # Project files are workspace state, not user attachments.
+    assert prompt["prompt"] == [{"type": "text", "text": "execute normal"}]
+
+
+@pytest.mark.parametrize("setup", [
+    {"files": "app.py"},
+    {"files": [], "git_commit": True},
+    {"git_commit": "yes", "files": ["app.py"]},
+    {"unknown": []},
+])
+def test_invalid_workspace_setup_is_rejected(setup) -> None:
+    from acp_eval.models import WorkspaceSetup
+
+    with pytest.raises(ValueError, match="workspace_setup"):
+        WorkspaceSetup.from_record({"workspace_setup": setup})
