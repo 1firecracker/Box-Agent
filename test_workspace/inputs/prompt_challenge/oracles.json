@@ -1,5 +1,5 @@
 {
- "version": "prompt-challenge/v1",
+ "version": "prompt-challenge/v2",
  "cases": [
   {
    "id": "c-missing-source",
