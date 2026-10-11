@@ -215,6 +215,16 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
                       *([arguments.vararg] if arguments.vararg else []),
                       *([arguments.kwarg] if arguments.kwarg else [])]
         return all(arg.annotation is not None for arg in parameters if arg.arg not in {"self", "cls"})
+    if kind == "cjk_ratio_below":
+        # Language follows the question: share of CJK among letters stays under max.
+        text = path.read_text(encoding="utf-8")
+        cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        letters = cjk + sum(1 for char in text if char.isascii() and char.isalpha())
+        return letters > 0 and cjk / letters < rule["max"]
+    if kind == "line_count":
+        # Exact deliverable shape: the number of non-empty lines.
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return len(lines) == rule["count"]
     if kind == "png":
         from PIL import Image
         try:

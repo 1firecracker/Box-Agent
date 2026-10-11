@@ -1,5 +1,5 @@
 {
- "version": "prompt-challenge/v2",
+ "version": "prompt-challenge/v3",
  "cases": [
   {
    "id": "c-missing-source",
@@ -136,6 +136,34 @@
       ".env",
       ".git"
      ]
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "c-language-follows-question",
+   "split": "challenge",
+   "checks": [
+    {
+     "kind": "cjk_ratio_below",
+     "path": "blurb.md",
+     "max": 0.2
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "c-exact-count",
+   "split": "challenge",
+   "checks": [
+    {
+     "kind": "line_count",
+     "path": "points.md",
+     "count": 5
     },
     {
      "kind": "no_unknown_tool"

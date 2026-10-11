@@ -587,3 +587,15 @@ def test_completed_or_waiting_accepts_either_outcome(attempt, acp_status, run_st
             "checks": [{"kind": "absent", "path": "summary.md"}]}
 
     assert baseline.evaluate_attempt(attempt, spec)["quality"] == expected
+
+
+def test_language_and_line_count_oracles(attempt):
+    (attempt / "workspace/blurb.md").write_text("ThermoLite 2 keeps drinks hot for 12 hours. 暖途", encoding="utf-8")
+    assert baseline.check_rule({"kind": "cjk_ratio_below", "path": "blurb.md", "max": 0.2}, attempt, [])
+    (attempt / "workspace/blurb.md").write_text("暖途保温杯，十二小时保热。ThermoLite", encoding="utf-8")
+    assert not baseline.check_rule({"kind": "cjk_ratio_below", "path": "blurb.md", "max": 0.2}, attempt, [])
+
+    (attempt / "workspace/points.md").write_text("- a\n- b\n\n- c\n- d\n- e\n", encoding="utf-8")
+    assert baseline.check_rule({"kind": "line_count", "path": "points.md", "count": 5}, attempt, [])
+    (attempt / "workspace/points.md").write_text("# 卖点\n- a\n- b\n- c\n- d\n- e\n", encoding="utf-8")
+    assert not baseline.check_rule({"kind": "line_count", "path": "points.md", "count": 5}, attempt, [])
