@@ -75,6 +75,7 @@ CASES = {
     "python_data_analysis_no_sandbox": ("python", "data_analysis", False, False, False,
                                         FULL_TOOLS - {"execute_code"}),
     "acp_general_with_policy": ("acp", None, False, True, False, FULL_TOOLS),
+    "acp_general_skillhub": ("acp", None, False, True, False, FULL_TOOLS | {"search_skillhub", "install_skillhub_skill"}),
 }
 # Cases assembled with an officev3-style filesystem policy (the ACP main path).
 POLICY_CASES = {"acp_general_with_policy"}
