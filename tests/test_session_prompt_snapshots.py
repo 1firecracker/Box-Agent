@@ -32,6 +32,7 @@ from box_agent.env_context import EnvContext
 from box_agent.plugins.builtins import SessionResources
 from box_agent.session_context import HostBindings, SessionContext, SessionOptions
 from box_agent.tools.image_generation_tool import _API_KEY_ENV, _ENDPOINT_ENV
+from box_agent.tools.permissions import CapabilityPolicy
 
 SNAPSHOT_DIR = Path(__file__).parent / "fixtures" / "session_prompts"
 UPDATE = os.environ.get("BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS") == "1"
@@ -73,7 +74,11 @@ CASES = {
     }),
     "python_data_analysis_no_sandbox": ("python", "data_analysis", False, False, False,
                                         FULL_TOOLS - {"execute_code"}),
+    "acp_general_with_policy": ("acp", None, False, True, False, FULL_TOOLS),
 }
+# Cases assembled with an officev3-style filesystem policy (the ACP main path).
+POLICY_CASES = {"acp_general_with_policy"}
+EXTRA_ALLOWED_DIRECTORY = "/Users/demo/Documents"
 
 
 class _Memory:
@@ -103,7 +108,7 @@ def pinned_environment(monkeypatch):
     monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _ctx: SKILL_RUNTIME_MARKER)
 
 
-async def _assemble(name: str, workspace: Path) -> str:
+async def _assemble(name: str, workspace: Path, *, workspace_layout=None) -> str:
     profile, session_mode, utility, sandbox_mode, follow_up, tools = CASES[name]
     config = Config(
         llm=LLMConfig(api_key="test"),
@@ -120,9 +125,19 @@ async def _assemble(name: str, workspace: Path) -> str:
         "cli": {"git": "/usr/bin/git"},
         "browser_tools": {"installed": True, "enabled": True, "available": True},
     })
+    policy = None
+    if name in POLICY_CASES:
+        policy = CapabilityPolicy().with_filesystem_overrides(
+            session_workspace_root=str(workspace),
+            allowed_directories=[EXTRA_ALLOWED_DIRECTORY],
+            filesystem_scope="session_workspace",
+            replace_allowed_directories=True,
+        )
     options = SessionOptions(
         profile=profile,
+        effective_policy=policy,
         workspace_dir=workspace,
+        workspace_layout=workspace_layout,
         utility=utility,
         sandbox_mode=sandbox_mode,
         session_mode=session_mode,
@@ -192,3 +207,106 @@ async def test_session_prompt_only_instructs_registered_tools(name, tmp_path, pi
 
     dangling = {tool: clause for tool, clause in _instructed_tools(prompt).items() if tool not in tools}
     assert not dangling, f"prompt instructs tools this session lacks: {dangling}"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+async def test_session_prompt_states_the_workspace_once(name, tmp_path, pinned_environment):
+    """One cwd statement; every by-name reference to it must resolve."""
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prompt = await _assemble(name, workspace)
+
+    assert prompt.count(str(workspace)) == 1
+    assert prompt.count(f"{WORKSPACE_STATEMENT_PREFIX}{workspace}`") == 1
+    assert "## Current Workspace" not in prompt
+
+
+async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_path):
+    from box_agent.agent import Agent
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    stated = Agent(
+        llm_client=object(), tools=[], workspace_dir=str(tmp_path),
+        system_prompt=f"base\n\n## File Access Context\n{WORKSPACE_STATEMENT_PREFIX}{tmp_path}`. cwd",
+    )
+    unstated = Agent(llm_client=object(), tools=[], workspace_dir=str(tmp_path), system_prompt="base")
+
+    assert "## Current Workspace" not in stated.messages[0].content
+    assert stated.messages[0].content.count(str(tmp_path)) == 1
+    assert "## Current Workspace" in unstated.messages[0].content
+
+
+@pytest.mark.parametrize("statement", [
+    "- Current workspace: `/another/project`.",
+    "- Current workspace: `{workspace}/nested`.",
+    "Quoted example: - Current workspace: `{workspace}`.",
+])
+def test_agent_states_actual_workspace_when_custom_statement_does_not_match(tmp_path, statement):
+    from box_agent.agent import Agent
+
+    prompt = "Caller constraints\n" + statement.format(workspace=tmp_path)
+    agent = Agent(llm_client=object(), tools=[], workspace_dir=str(tmp_path), system_prompt=prompt)
+
+    assert agent.messages[0].content.startswith(prompt)
+    assert f"You are currently working in: `{tmp_path}`" in agent.messages[0].content
+
+
+@pytest.mark.parametrize("name", ["python_general", "acp_general_with_policy"])
+@pytest.mark.parametrize("relative_workspace", [".", "workspace"])
+@pytest.mark.parametrize("explicit_selected_root", [False, True])
+async def test_relative_workspace_has_one_absolute_cwd_statement(
+    name, relative_workspace, explicit_selected_root, tmp_path, monkeypatch, pinned_environment,
+):
+    from box_agent.agent import Agent
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    monkeypatch.chdir(tmp_path)
+    workspace = Path(relative_workspace)
+    workspace.mkdir(exist_ok=True)
+    layout = {"selectedRootDir": str(workspace.resolve())} if explicit_selected_root else None
+    prompt = await _assemble(name, workspace, workspace_layout=layout)
+    agent = Agent(
+        llm_client=object(), tools=[], workspace_dir=str(workspace), system_prompt=prompt,
+    )
+
+    content = agent.messages[0].content
+    assert content.count(str(workspace.absolute())) == 1
+    assert f"{WORKSPACE_STATEMENT_PREFIX}{workspace.absolute()}`" in content
+    assert "## Current Workspace" not in content
+
+
+def test_relative_workspace_and_absolute_policy_root_are_not_repeated(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = Path("workspace")
+    policy = CapabilityPolicy().with_filesystem_overrides(
+        session_workspace_root=str(workspace.absolute()),
+        allowed_directories=[str(workspace), str(workspace.absolute())],
+        filesystem_scope="session_workspace",
+        replace_allowed_directories=True,
+    )
+
+    prompt = session_assembly._filesystem_access_prompt(workspace, policy)
+
+    assert prompt.count(str(workspace.absolute())) == 1
+    assert "include the current workspace." in prompt
+
+
+@pytest.mark.parametrize("name", ["python_general", "acp_general_with_policy"])
+async def test_relative_workspace_keeps_a_distinct_selected_root(
+    name, tmp_path, monkeypatch, pinned_environment,
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = Path("workspace")
+    workspace.mkdir()
+    selected_root = tmp_path / "project"
+    selected_root.mkdir()
+
+    prompt = await _assemble(
+        name, workspace, workspace_layout={"selectedRootDir": str(selected_root)},
+    )
+
+    assert f"selected workspace root）：`{selected_root}`" in prompt
+    assert f"当前会话工作目录（cwd）：`{workspace.absolute()}`" in prompt
+    assert "就是当前会话工作目录" not in prompt
