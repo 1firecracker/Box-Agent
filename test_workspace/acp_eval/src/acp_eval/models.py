@@ -14,17 +14,28 @@ class WorkspaceSetup:
 
     ``files`` are copied (by basename) and, with ``git_commit``, committed as
     the repository baseline; ``dirty_files`` are copied afterwards so the tree
-    starts with uncommitted user work.
+    starts with uncommitted user work. With ``root`` (a directory in the case
+    pack), paths are relative to it and keep their subdirectories, so nested
+    project layouts such as ``pkg/AGENTS.md`` can be staged.
     """
 
     files: tuple[str, ...] = ()
     git_commit: bool = False
     dirty_files: tuple[str, ...] = ()
+    root: str | None = None
+
+    def destination(self, path: str) -> str:
+        """Workspace-relative destination of a staged path."""
+        return path if self.root is not None else Path(path).name
+
+    def source(self, path: str) -> str:
+        """Pack-relative source of a staged path."""
+        return f"{self.root}/{path}" if self.root is not None else path
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "WorkspaceSetup":
         value = record.get("workspace_setup", {})
-        if not isinstance(value, dict) or set(value) - {"files", "git_commit", "dirty_files"}:
+        if not isinstance(value, dict) or set(value) - {"files", "git_commit", "dirty_files", "root"}:
             raise ValueError("workspace_setup: unsupported fields or type")
 
         def paths(key: str) -> tuple[str, ...]:
@@ -38,7 +49,15 @@ class WorkspaceSetup:
         git_commit = value.get("git_commit", False)
         if not isinstance(git_commit, bool):
             raise ValueError("workspace_setup: git_commit must be a boolean")
-        setup = cls(files=paths("files"), git_commit=git_commit, dirty_files=paths("dirty_files"))
+        root = value.get("root")
+        if root is not None and (not isinstance(root, str) or not root or "\x00" in root
+                                 or Path(root).is_absolute() or ".." in Path(root).parts):
+            raise ValueError("workspace_setup: root must be a relative directory in the pack")
+        files, dirty = paths("files"), paths("dirty_files")
+        if root is not None and any(Path(item).is_absolute() or ".." in Path(item).parts
+                                    for item in (*files, *dirty)):
+            raise ValueError("workspace_setup: rooted paths must stay inside root")
+        setup = cls(files=files, git_commit=git_commit, dirty_files=dirty, root=root)
         if setup.git_commit and not setup.files:
             raise ValueError("workspace_setup: git_commit needs files to commit")
         return setup

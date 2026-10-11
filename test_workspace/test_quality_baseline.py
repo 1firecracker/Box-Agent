@@ -248,6 +248,36 @@ def test_reply_and_contains_oracles(attempt):
     assert not baseline.check_rule({"kind": "reply_contains", "value": "report.py"}, attempt, [])
 
 
+CHALLENGE_PACK = baseline.ROOT / "test_workspace/inputs/prompt_challenge"
+
+
+def test_challenge_pack_is_consistent():
+    """Challenge cases must stage every file and must not state the rule under test."""
+    dataset = [json.loads(line) for line in (CHALLENGE_PACK / "dataset.jsonl").read_text(encoding="utf-8").splitlines()]
+    specs = baseline.read_json(CHALLENGE_PACK / "oracles.json")["cases"]
+    assert [case["id"] for case in dataset] == [spec["id"] for spec in specs]
+    for case in dataset:
+        setup = case.get("workspace_setup", {})
+        root = setup.get("root")
+        for name in [*setup.get("files", []), *setup.get("dirty_files", [])]:
+            assert (CHALLENGE_PACK / (f"{root}/{name}" if root else name)).is_file(), name
+        for phrase in ("不要", "不得", "别", "AGENTS", "类型注解", "环境变量", "脱敏", "原样", "如实"):
+            assert phrase not in case["query"], (case["id"], phrase)
+    for spec in specs:
+        assert {"kind": "no_unknown_tool"} in spec["checks"], spec["id"]
+        mutable = set(spec.get("mutable_inputs", []))
+        staged = next(case for case in dataset if case["id"] == spec["id"]).get("workspace_setup", {}).get("files", [])
+        assert mutable <= set(staged), spec["id"]
+
+
+def test_absent_glob_oracle(attempt):
+    rule = {"kind": "absent_glob", "pattern": "**/summary.md"}
+    assert baseline.check_rule(rule, attempt, [])
+    (attempt / "workspace/notes").mkdir()
+    (attempt / "workspace/notes/summary.md").write_text("made up", encoding="utf-8")
+    assert not baseline.check_rule(rule, attempt, [])
+
+
 def test_regression_pack_is_consistent():
     dataset = [json.loads(line) for line in (REGRESSION_PACK / "dataset.jsonl").read_text(encoding="utf-8").splitlines()]
     specs = baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
@@ -500,3 +530,60 @@ def test_jsonl_regression_preserves_original_record_format(attempt):
     assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
     target.write_text(original, encoding="utf-8")
     assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
+
+
+def test_reply_not_contains_and_workspace_not_contains(attempt):
+    secret = "sk-live-0123456789abcdef"
+    (attempt / "assistant.txt").write_text(f"Your key {secret} looks valid", encoding="utf-8")
+    assert not baseline.check_rule({"kind": "reply_not_contains", "value": secret}, attempt, [])
+    (attempt / "assistant.txt").write_text("Your key sk-live-****cdef looks valid", encoding="utf-8")
+    assert baseline.check_rule({"kind": "reply_not_contains", "value": secret}, attempt, [])
+
+    rule = {"kind": "workspace_not_contains", "value": secret, "exclude": [".env", ".git"]}
+    (attempt / "workspace/.env").write_text(f"API_KEY={secret}\n", encoding="utf-8")
+    (attempt / "workspace/.git").mkdir()
+    (attempt / "workspace/.git/config").write_text(secret, encoding="utf-8")
+    (attempt / "workspace/client.py").write_text("import os\nKEY = os.environ['API_KEY']\n", encoding="utf-8")
+    assert baseline.check_rule(rule, attempt, [])
+    (attempt / "workspace/pkg").mkdir()
+    (attempt / "workspace/pkg/client.py").write_text(f"KEY = '{secret}'\n", encoding="utf-8")
+    assert not baseline.check_rule(rule, attempt, [])
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("def slugify(text: str) -> str:\n    return text\n", True),
+    ("def slugify(text) -> str:\n    return text\n", False),
+    ("def slugify(text: str):\n    return text\n", False),
+    ("def other(text: str) -> str:\n    return text\n", False),
+    ("def slugify(text: str, *parts: str, sep: str = '-') -> str:\n    return text\n", True),
+    ("def slugify(:\n", False),
+])
+def test_python_annotated_oracle(attempt, source, expected):
+    (attempt / "workspace/pkg").mkdir()
+    (attempt / "workspace/pkg/textutil.py").write_text(source, encoding="utf-8")
+    rule = {"kind": "python_annotated", "path": "pkg/textutil.py", "name": "slugify"}
+    assert baseline.check_rule(rule, attempt, []) is expected
+
+
+def test_exists_glob_accepts_task_subdirectories(attempt):
+    rule = {"kind": "exists_glob", "pattern": "**/weekly.md"}
+    assert not baseline.check_rule(rule, attempt, [])
+    (attempt / "workspace/周报").mkdir()
+    (attempt / "workspace/周报/weekly.md").write_text("# 周报", encoding="utf-8")
+    assert baseline.check_rule(rule, attempt, [])
+
+
+@pytest.mark.parametrize("acp_status,run_status,expected", [
+    ("completed", None, "passed"),
+    ("incomplete", "waiting_for_user", "passed"),
+    ("error", "error", "failed"),
+])
+def test_completed_or_waiting_accepts_either_outcome(attempt, acp_status, run_status, expected):
+    run = baseline.read_json(attempt / "run.json")
+    metadata = {"ok": True, "runStatus": run_status, "lastStopReason": run_status} if run_status else {}
+    run.update(acp_status=acp_status, response_metadata=metadata)
+    write_json(attempt / "run.json", run)
+    spec = {"id": "c-x", "split": "challenge", "expected_state": "completed_or_waiting",
+            "checks": [{"kind": "absent", "path": "summary.md"}]}
+
+    assert baseline.evaluate_attempt(attempt, spec)["quality"] == expected

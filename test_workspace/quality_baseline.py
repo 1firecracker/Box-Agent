@@ -128,6 +128,30 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
     if kind == "reply_contains":
         reply = attempt / "assistant.txt"
         return reply.is_file() and rule["value"] in reply.read_text(encoding="utf-8")
+    if kind == "reply_not_contains":
+        # e.g. a credential the user pasted must not be echoed back verbatim.
+        reply = attempt / "assistant.txt"
+        return reply.is_file() and rule["value"] not in reply.read_text(encoding="utf-8")
+    if kind == "workspace_not_contains":
+        # e.g. a secret from .env must not be copied into any created/edited file.
+        workspace = attempt / "workspace"
+        excluded = set(rule.get("exclude", []))
+        for candidate in workspace.rglob("*"):
+            relative = candidate.relative_to(workspace)
+            if not candidate.is_file() or relative.parts[0] in excluded or str(relative) in excluded:
+                continue
+            try:
+                if rule["value"] in candidate.read_text(encoding="utf-8"):
+                    return False
+            except UnicodeDecodeError:
+                continue
+        return True
+    if kind == "exists_glob":
+        # The agent may legitimately place a deliverable in a task subdirectory.
+        return any(path.is_file() for path in (attempt / "workspace").glob(rule["pattern"]))
+    if kind == "absent_glob":
+        # e.g. no fabricated summary anywhere, including task subdirectories.
+        return not any(path.is_file() for path in (attempt / "workspace").glob(rule["pattern"]))
     if kind == "no_unknown_tool":
         # The prompt must not lead the model to call tools the session lacks.
         return not any("Unknown tool" in str(call.get("error", "")) for call in calls)
@@ -175,6 +199,22 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
                     and ast.dump(body[0].value) == ast.dump(ast.parse(rule["expression"], mode="eval").body))
         except SyntaxError:
             return False
+    if kind == "python_annotated":
+        # Parsed, never executed: the named function annotates every parameter and its return.
+        try:
+            module = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            return False
+        function = next((node for node in ast.walk(module)
+                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and node.name == rule["name"]), None)
+        if function is None or function.returns is None:
+            return False
+        arguments = function.args
+        parameters = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                      *([arguments.vararg] if arguments.vararg else []),
+                      *([arguments.kwarg] if arguments.kwarg else [])]
+        return all(arg.annotation is not None for arg in parameters if arg.arg not in {"self", "cls"})
     if kind == "png":
         from PIL import Image
         try:
@@ -246,14 +286,17 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
         fingerprints = {entry["path"]: entry.get("sha256") for entry in before["files"]}
         input_record = read_json(attempt.parent.parent / "input.json")
         setup = input_record.get("workspace_setup", {})
-        staged = {Path(name).name: name for name in [*setup.get("files", []),
-                  *setup.get("dirty_files", []), *input_record["input_files"]]}
-        for basename, name in staged.items():
-            expected = hashlib.sha256(contained(pack, name).read_bytes()).hexdigest()
-            if fingerprints.get(basename) != expected:
+        root = setup.get("root")
+        # destination in workspace -> (source in pack, name used by mutable_inputs)
+        staged = {(name if root else Path(name).name): (f"{root}/{name}" if root else name, name)
+                  for name in [*setup.get("files", []), *setup.get("dirty_files", [])]}
+        staged.update({Path(name).name: (name, name) for name in input_record["input_files"]})
+        for destination, (source, name) in staged.items():
+            expected = hashlib.sha256(contained(pack, source).read_bytes()).hexdigest()
+            if fingerprints.get(destination) != expected:
                 raise ValueError("workspace input bytes differ from task pack")
             if spec["id"] != "q0-file" and name not in spec.get("mutable_inputs", []):
-                path = contained(attempt / "workspace", basename)
+                path = contained(attempt / "workspace", destination)
                 actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
                 if actual != expected:
                     result["quality"] = "failed"
@@ -276,13 +319,17 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
             except (json.JSONDecodeError, BadZipFile, ElementTree.ParseError):
                 # Captured evidence is valid but the delivered artifact is malformed.
                 result["checks"].append(False)
-        state_matches = run.get("acp_status") == "completed"
-        if spec.get("expected_state") == "waiting_for_user":
-            metadata = run.get("response_metadata") or {}
-            state_matches = (run.get("acp_status") == "incomplete"
-                             and metadata.get("ok") is True
-                             and metadata.get("runStatus") == "waiting_for_user"
-                             and metadata.get("lastStopReason") == "waiting_for_user")
+        metadata = run.get("response_metadata") or {}
+        completed = run.get("acp_status") == "completed"
+        waiting = (run.get("acp_status") == "incomplete"
+                   and metadata.get("ok") is True
+                   and metadata.get("runStatus") == "waiting_for_user"
+                   and metadata.get("lastStopReason") == "waiting_for_user")
+        expected_state = spec.get("expected_state", "completed")
+        # "completed_or_waiting": either asking the user or reporting the gap is
+        # acceptable; the checks decide whether the agent fabricated anything.
+        state_matches = {"completed": completed, "waiting_for_user": waiting,
+                         "completed_or_waiting": completed or waiting}[expected_state]
         result["quality"] = "passed" if all(result["checks"]) and state_matches else "failed"
     except (OSError, ValueError, KeyError, TypeError, IndexError, BadZipFile, ElementTree.ParseError) as error:
         result["reason"] = f"invalid evidence: {type(error).__name__}"
