@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime
 import hashlib
 import json
@@ -50,6 +51,9 @@ def source_identity(pack: Path = PACK) -> dict:
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "source_sha256": digest(hashes), "source_files": hashes,
         "oracle_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "runner_sha256": digest({str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                 for p in [ROOT / "test_workspace/run_acp_eval.py",
+                                           *sorted((ROOT / "test_workspace/acp_eval/src").rglob("*.py"))]}),
         "pack_sha256": digest({str(p.relative_to(pack)): hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in sorted(pack.rglob("*")) if p.is_file()}),
         "python": platform.python_version(), "platform": platform.platform(),
@@ -138,6 +142,38 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
         return path.read_text(encoding="utf-8").strip() == rule["value"]
     if kind == "contains":
         return rule["value"] in path.read_text(encoding="utf-8")
+    if kind == "python_function":
+        # Inspect the supplied arithmetic fixture without executing captured code.
+        try:
+            module = ast.parse(path.read_text(encoding="utf-8"))
+            if any(not isinstance(node, ast.FunctionDef) and not (
+                isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ) for node in module.body):
+                return False
+            functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+            function = functions.get(rule["name"])
+            if function is None or function.decorator_list:
+                return False
+            parameters = [arg.arg for arg in [*function.args.posonlyargs, *function.args.args]]
+            body = function.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                body = body[1:]  # A docstring does not change the tested arithmetic.
+            return (parameters == rule["parameters"] and not function.args.vararg
+                    and not function.args.kwarg and not function.args.kwonlyargs
+                    and len(body) == 1 and isinstance(body[0], ast.Return)
+                    and ast.dump(body[0].value) == ast.dump(ast.parse(rule["expression"], mode="eval").body))
+        except SyntaxError:
+            return False
+    if kind == "png":
+        from PIL import Image
+        try:
+            with Image.open(path) as image:
+                valid = image.format == "PNG" and image.width > 0 and image.height > 0
+                image.verify()
+                return valid
+        except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+            return False
     if kind == "xlsx":
         ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         with ZipFile(path) as archive:
@@ -183,11 +219,7 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
             result["reason"] = "incomplete or inconsistent capture"
             return result
         details = (run.get("response_metadata") or {}).get("errorDetails") or {}
-        if run.get("acp_status") == "error" and details.get("source") == "llm_provider":
-            # A provider/network failure (e.g. HTTP 499/5xx) says nothing about
-            # the prompt or agent; never count it as a task failure in A/B.
-            result["reason"] = f"model provider error: {details.get('httpStatus') or details.get('code')}"
-            return result
+        provider_error = run.get("acp_status") == "error" and details.get("source") == "llm_provider"
         records = trace_records(attempt)
         result["requests"] = request_inventory(records)
         if not result["requests"]:
@@ -203,16 +235,31 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
         before = read_json(attempt / "files-before.json")
         fingerprints = {entry["path"]: entry.get("sha256") for entry in before["files"]}
         input_record = read_json(attempt.parent.parent / "input.json")
-        for name in input_record["input_files"]:
+        setup = input_record.get("workspace_setup", {})
+        staged = {Path(name).name: name for name in [*setup.get("files", []),
+                  *setup.get("dirty_files", []), *input_record["input_files"]]}
+        for basename, name in staged.items():
             expected = hashlib.sha256(contained(pack, name).read_bytes()).hexdigest()
-            if fingerprints.get(Path(name).name) != expected:
-                raise ValueError("input bytes differ from task pack")
+            if fingerprints.get(basename) != expected:
+                raise ValueError("workspace input bytes differ from task pack")
             if spec["id"] != "q0-file" and name not in spec.get("mutable_inputs", []):
-                actual = hashlib.sha256(contained(attempt / "workspace", Path(name).name).read_bytes()).hexdigest()
+                path = contained(attempt / "workspace", basename)
+                actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
                 if actual != expected:
                     result["quality"] = "failed"
                     result["reason"] = "input preservation constraint violated"
                     return result
+        if provider_error:
+            # A missing final artifact is inconclusive after an infrastructure
+            # error; a forbidden action already captured is a conclusive failure.
+            result["checks"] = [check_rule(rule, attempt, calls) for rule in spec["checks"]
+                                if rule["kind"] in {"no_tool", "tool_args_not_matching", "no_unknown_tool"}]
+            if not all(result["checks"]):
+                result["quality"] = "failed"
+                result["reason"] = "observed constraint violation before model provider error"
+            else:
+                result["reason"] = f"model provider error: {details.get('httpStatus') or details.get('code')}"
+            return result
         for rule in spec["checks"]:
             try:
                 result["checks"].append(check_rule(rule, attempt, calls))
@@ -280,10 +327,14 @@ def _total_tokens(usage: object) -> int | None:
     return sum(numbers) if numbers else None
 
 
-def _side(directories: list[Path], pack: Path) -> dict[str, dict]:
+def _side(directories: list[Path], pack: Path, expected_model_config: str | None = None) -> dict[str, dict]:
     per_case: dict[str, dict] = {}
     for directory in directories:
         for result in evaluate_run(directory.resolve(), pack)["results"]:
+            model_config = result.get("model_config_sha256")
+            if expected_model_config and (model_config is not None or result["quality"] != "unverified"):
+                if model_config != expected_model_config:
+                    raise ValueError("incompatible comparison context: attempt model differs from run manifest")
             row = per_case.setdefault(result["case_id"], {
                 "passed": 0, "failed": 0, "unverified": 0, "tokens": [], "tool_calls": [], "failed_tool_calls": [],
             })
@@ -299,6 +350,18 @@ def _side(directories: list[Path], pack: Path) -> dict[str, dict]:
     return per_case
 
 
+def _comparison_context(directory: Path) -> dict:
+    context = read_json(directory / "baseline-context.json")
+    manifest = read_json(directory / "manifest.json")
+    keys = ("runner_sha256", "oracle_sha256", "pack_sha256", "python", "platform",
+            "profile_config_sha256", "environment")
+    if any(key not in context for key in keys) or not manifest.get("model_config_sha256"):
+        raise ValueError("missing comparison context; capture both sides with the current runner")
+    return {**{key: context[key] for key in keys},
+            "model_config_sha256": manifest["model_config_sha256"],
+            "schema_version": manifest.get("schema_version")}
+
+
 def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK) -> dict:
     """Per-case pass counts and mean cost for two groups of repeated runs.
 
@@ -307,7 +370,13 @@ def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK)
     infrastructure noise neither hides nor fakes a regression. A regression is
     any case whose candidate pass rate is lower than the baseline's.
     """
-    before, after = _side(baseline, pack), _side(candidate, pack)
+    contexts = [_comparison_context(directory.resolve()) for directory in [*baseline, *candidate]]
+    if not baseline or not candidate:
+        raise ValueError("both comparison sides require runs")
+    if any(context != contexts[0] for context in contexts[1:]):
+        raise ValueError("incompatible comparison context: model, runner, pack, profile or environment differs")
+    before = _side(baseline, pack, contexts[0].get("model_config_sha256"))
+    after = _side(candidate, pack, contexts[0].get("model_config_sha256"))
     mean = lambda values: round(sum(values) / len(values), 1) if values else None
     cases = []
     for case_id in sorted(set(before) | set(after)):
@@ -321,10 +390,13 @@ def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK)
                            "mean_tokens": mean(row["tokens"]), "mean_tool_calls": mean(row["tool_calls"]),
                            "mean_failed_tool_calls": mean(row["failed_tool_calls"])}
         cases.append({"case_id": case_id, **rows})
-    regressions = [case["case_id"] for case in cases
-                   if (case["baseline"]["pass_rate"] or 0) > (case["candidate"]["pass_rate"] or 0)]
+    inconclusive = [case["case_id"] for case in cases
+                    if case["baseline"]["pass_rate"] is None or case["candidate"]["pass_rate"] is None]
+    regressions = [case["case_id"] for case in cases if case["case_id"] not in inconclusive
+                   and case["baseline"]["pass_rate"] > case["candidate"]["pass_rate"]]
     return {"pack": str(pack), "baseline_runs": [str(p) for p in baseline],
-            "candidate_runs": [str(p) for p in candidate], "cases": cases, "regressions": regressions}
+            "candidate_runs": [str(p) for p in candidate], "cases": cases,
+            "regressions": regressions, "inconclusive": inconclusive, "context": contexts[0]}
 
 
 def render_comparison(report: dict) -> str:
@@ -342,6 +414,7 @@ def render_comparison(report: dict) -> str:
         )
     lines.append("")
     lines.append(f"regressions: {', '.join(report['regressions']) or 'none'}")
+    lines.append(f"inconclusive: {', '.join(report['inconclusive']) or 'none'}")
     return "\n".join(lines)
 
 
@@ -364,9 +437,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     pack = args.pack.resolve()
     if args.command == "compare":
-        report = compare_runs(args.baseline, args.candidate, pack)
+        try:
+            report = compare_runs(args.baseline, args.candidate, pack)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"comparison unavailable: {type(error).__name__}: {error}")
+            return 2
         print(render_comparison(report))
-        return 0 if not report["regressions"] else 1
+        return 1 if report["regressions"] else (2 if report["inconclusive"] else 0)
     if args.command == "run":
         from test_workspace import run_acp_eval
         title = f"q0-{uuid4().hex[:8]}"

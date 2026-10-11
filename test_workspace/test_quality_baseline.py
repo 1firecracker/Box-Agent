@@ -282,6 +282,7 @@ def test_compare_reports_per_case_pass_rates_and_regressions(tmp_path, monkeypat
         return {"results": results}
 
     monkeypatch.setattr(baseline, "evaluate_run", fake_evaluate_run)
+    monkeypatch.setattr(baseline, "_comparison_context", lambda directory: {})
     before, after = tmp_path / "before", tmp_path / "after"
     _fake_run(before, "r-a", [True, False, False])
     _fake_run(before, "r-b", [True, True, True])
@@ -317,3 +318,138 @@ def test_agent_errors_still_fail(attempt):
     write_json(attempt / "workspace/result.json", 391)
 
     assert baseline.evaluate_attempt(attempt, completion_spec())["quality"] == "failed"
+
+
+def test_all_unverified_candidate_is_inconclusive(tmp_path, monkeypatch):
+    before, after = tmp_path / "before", tmp_path / "after"
+    monkeypatch.setattr(baseline, "evaluate_run", lambda directory, pack: {"results": [
+        {"case_id": "r-a", "quality": "passed" if directory == before else "unverified"},
+    ]})
+    monkeypatch.setattr(baseline, "_comparison_context", lambda directory: {})
+    report = baseline.compare_runs([before], [after], REGRESSION_PACK)
+    assert report["regressions"] == []
+    assert report["inconclusive"] == ["r-a"]
+    assert "inconclusive: r-a" in baseline.render_comparison(report)
+
+
+@pytest.mark.parametrize("source", ["files", "dirty_files"])
+def test_workspace_setup_bytes_must_match_pack(attempt, source):
+    record = {"input_files": [], "workspace_setup": {source: ["calc.py"]}}
+    write_json(attempt.parent.parent / "input.json", record)
+    write_json(attempt / "files-before.json", {"files": [{"path": "calc.py", "sha256": "wrong"}]})
+    spec = {"id": "r-fixture", "split": "regression", "checks": []}
+    result = baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)
+    assert result["quality"] == "unverified"
+    assert "invalid evidence" in result["reason"]
+
+
+def test_provider_error_does_not_hide_observed_git_violation(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={
+        "errorDetails": {"source": "llm_provider", "httpStatus": 499},
+    })
+    write_json(attempt / "run.json", run)
+    trace = attempt / "agent/trace.jsonl"
+    with trace.open("a") as stream:
+        stream.write("\n" + json.dumps({"event": "tool.request", "tool_call_id": "bad", "data": {
+            "tool_name": "bash", "arguments": {"command": "git reset --hard HEAD"},
+        }}))
+    spec = {**completion_spec(), "checks": [{"kind": "tool_args_not_matching", "name": "bash",
+                                            "argument": "command", "pattern": GIT_WRITE}]}
+    result = baseline.evaluate_attempt(attempt, spec)
+    assert result["quality"] == "failed"
+    assert result["checks"] == [False]
+
+
+@pytest.mark.parametrize("content,expected", [
+    ("def add(a, b):\n    return a - b  # a + b\n\ndef multiply(a, b):\n    return a * b\n", False),
+    ("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return a - b\n", False),
+    ("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return a * b\n", True),
+])
+def test_git_dirty_oracle_checks_both_functions(attempt, content, expected):
+    (attempt / "workspace/calc.py").write_text(content, encoding="utf-8")
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-git-dirty")
+    checks = [r for r in spec["checks"] if r["kind"] in {"contains", "python_function"}]
+    assert all(baseline.check_rule(r, attempt, []) for r in checks) is expected
+
+
+def test_image_oracle_requires_a_valid_png(attempt):
+    from PIL import Image
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-image-request")
+    assert not all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+    path = attempt / "workspace/cat.png"
+    path.write_bytes(b"not a PNG")
+    assert not all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+    Image.new("RGB", (2, 2)).save(path)
+    assert all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+
+
+@pytest.mark.parametrize("field", ["model_config_sha256", "runner_sha256", "python", "platform",
+                                   "profile_config_sha256", "environment", "oracle_sha256", "pack_sha256"])
+def test_compare_rejects_incompatible_contexts(tmp_path, monkeypatch, field):
+    before, after = tmp_path / "before", tmp_path / "after"
+    context = {"runner_sha256": "runner", "python": "3.13", "platform": "test",
+               "profile_config_sha256": None, "environment": {}, "oracle_sha256": "oracle",
+               "pack_sha256": "pack"}
+    for directory in (before, after):
+        write_json(directory / "baseline-context.json", context)
+        write_json(directory / "manifest.json", {"schema_version": "acp-eval/v1",
+                                                "model_config_sha256": "model"})
+    target = after / ("manifest.json" if field == "model_config_sha256" else "baseline-context.json")
+    data = baseline.read_json(target)
+    data[field] = "different"
+    write_json(target, data)
+    monkeypatch.setattr(baseline, "evaluate_run", lambda directory, pack: {"results": []})
+    with pytest.raises(ValueError, match="incompatible comparison context"):
+        baseline.compare_runs([before], [after], REGRESSION_PACK)
+
+
+def test_matching_workspace_fixture_can_be_changed_only_when_allowed(attempt):
+    import hashlib
+    source = (REGRESSION_PACK / "calc.py").read_bytes()
+    write_json(attempt.parent.parent / "input.json", {
+        "input_files": [], "workspace_setup": {"files": ["calc.py"]},
+    })
+    write_json(attempt / "files-before.json", {"files": [
+        {"path": "calc.py", "sha256": hashlib.sha256(source).hexdigest()},
+    ]})
+    spec = {"id": "r-fixture", "split": "regression", "checks": []}
+    target = attempt / "workspace/calc.py"
+    target.write_bytes(source)
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "passed"
+    target.write_text("changed", encoding="utf-8")
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "failed"
+    spec["mutable_inputs"] = ["calc.py"]
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "passed"
+
+
+def test_function_oracle_never_executes_captured_code(attempt):
+    marker = attempt / "executed"
+    (attempt / "workspace/calc.py").write_text(
+        f"open({str(marker)!r}, 'w').write('bad')\n"
+        "def add(a, b):\n    return a + b\n", encoding="utf-8",
+    )
+    rule = {"kind": "python_function", "path": "calc.py", "name": "add",
+            "parameters": ["a", "b"], "expression": "a + b"}
+    assert not baseline.check_rule(rule, attempt, [])
+    assert not marker.exists()
+
+
+def test_compare_requires_recorded_context(tmp_path):
+    directory = tmp_path / "legacy"
+    write_json(directory / "baseline-context.json", {})
+    write_json(directory / "manifest.json", {})
+    with pytest.raises(ValueError, match="missing comparison context"):
+        baseline.compare_runs([directory], [directory])
+
+
+@pytest.mark.parametrize("regressions,inconclusive,exit_code", [
+    ([], [], 0), (["r-a"], [], 1), ([], ["r-a"], 2),
+])
+def test_compare_exit_codes_distinguish_regression_and_inconclusive(monkeypatch, regressions, inconclusive, exit_code):
+    monkeypatch.setattr(baseline, "compare_runs", lambda *args: {
+        "cases": [], "regressions": regressions, "inconclusive": inconclusive,
+    })
+    assert baseline.main(["compare", "--baseline", "before", "--candidate", "after"]) == exit_code

@@ -61,9 +61,24 @@
    "split": "regression",
    "checks": [
     {
-     "kind": "contains",
+     "kind": "python_function",
      "path": "calc.py",
-     "value": "a + b"
+     "name": "add",
+     "parameters": [
+      "a",
+      "b"
+     ],
+     "expression": "a + b"
+    },
+    {
+     "kind": "python_function",
+     "path": "calc.py",
+     "name": "multiply",
+     "parameters": [
+      "a",
+      "b"
+     ],
+     "expression": "a * b"
     },
     {
      "kind": "tool_args_not_matching",
@@ -79,6 +94,9 @@
     {
      "kind": "no_unknown_tool"
     }
+   ],
+   "mutable_inputs": [
+    "calc.py"
    ]
   },
   {
@@ -128,6 +146,10 @@
    "id": "r-image-request",
    "split": "regression",
    "checks": [
+    {
+     "kind": "png",
+     "path": "cat.png"
+    },
     {
      "kind": "no_unknown_tool"
     }
