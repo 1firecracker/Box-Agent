@@ -110,7 +110,7 @@ def pinned_environment(monkeypatch):
     monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _ctx: SKILL_RUNTIME_MARKER)
 
 
-async def _assemble(name: str, workspace: Path, *, workspace_layout=None) -> str:
+async def _assemble(name: str, workspace: Path, *, workspace_layout=None, child: bool = False) -> str:
     profile, session_mode, utility, sandbox_mode, follow_up, tools = CASES[name]
     config = Config(
         llm=LLMConfig(api_key="test"),
@@ -151,7 +151,7 @@ async def _assemble(name: str, workspace: Path, *, workspace_layout=None) -> str
     resources.memory_manager = _Memory()
     resources.tools = [SimpleNamespace(name=tool) for tool in sorted(tools)]
     await session_assembly.prepare_prompt(resources)
-    return resources.system_prompt
+    return resources.state["child_system_prompt"] if child else resources.system_prompt
 
 
 def _normalize(prompt: str, workspace: Path) -> str:
@@ -325,7 +325,7 @@ async def test_sub_agent_inherited_prompt_matches_snapshot(name, tmp_path, pinne
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     parent = await _assemble(name, workspace)
-    actual = _normalize(_child_safe_parent_prompt(parent), workspace)
+    actual = _normalize(_child_safe_parent_prompt(await _assemble(name, workspace, child=True)), workspace)
 
     snapshot = SNAPSHOT_DIR / f"sub_agent_from_{name}.md"
     if UPDATE:
@@ -342,17 +342,23 @@ INHERITED_CONSTRAINTS = (
 
 @pytest.mark.parametrize("name", ("acp_general_follow_up", "acp_code_agent"))
 async def test_sub_agent_drops_parent_only_blocks_and_keeps_constraints(name, tmp_path, pinned_environment):
-    from box_agent.tools.sub_agent_tool import _PARENT_ONLY_BLOCKS, _child_safe_parent_prompt
+    from box_agent.tools.sub_agent_tool import _child_safe_parent_prompt
+
+    parent_markers = (
+        "--- MEMORY START ---\n", "<workflow>\n", "# Role\n",
+        "## 用户引导提示 (Action Hint)\n", "## 后续建议（仅供本地 Agent 输入框使用）\n",
+        "## Native Image Generation\n", "## Available Skills\n",
+    )
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     parent = await _assemble(name, workspace) + "\n\n## Available Skills\n- demo: parent-only catalog"
-    child = _child_safe_parent_prompt(parent)
+    child = _child_safe_parent_prompt(await _assemble(name, workspace, child=True))
 
     # The markers must still be produced by assembly; a renamed heading would
     # otherwise leak silently into every child.
-    present = [marker for marker, _ in _PARENT_ONLY_BLOCKS if marker in parent]
-    expected = {marker for marker, _ in _PARENT_ONLY_BLOCKS}
+    present = [marker for marker in parent_markers if marker in parent]
+    expected = set(parent_markers)
     if name != "acp_general_follow_up":
         expected.discard("## 后续建议（仅供本地 Agent 输入框使用）\n")
     assert set(present) == expected
@@ -393,6 +399,7 @@ async def test_agent_hands_sub_agent_the_projected_parent_prompt(tmp_path, pinne
     parent = await _assemble("acp_general", workspace)
     tool = SubAgentTool(llm=AsyncMock(), parent_tools={})
     agent = Agent(llm_client=AsyncMock(), system_prompt=parent, tools=[tool], workspace_dir=str(workspace))
+    agent.set_child_system_prompt(await _assemble("acp_general", workspace, child=True))
 
     assert "<workflow>" in agent.messages[0].content
     inherited = tool._parent_system_prompt

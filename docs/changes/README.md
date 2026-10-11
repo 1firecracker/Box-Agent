@@ -6,6 +6,12 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-11 — Child prompt projection with explicit ownership
+
+- Shared session assembly produces the child view before combining generated memory, image guidance and host UI overlays. Only the exact packaged template's role/workflow is omitted; custom templates, project instructions and recovery suffixes remain caller-owned. The parent prompt is unchanged.
+- Agent binds that explicit child view through AgentSession. Owned Skill-catalog and external-memory updates preserve it; an ordinary set_system_prompt replacement returns ownership to the caller. Prepared host prompts retain their compatibility passthrough. Child tools, policy, selected Skills and execution rules are unchanged.
+- No new configuration, dependencies or migration. Source tests and Python distributions do not update a consuming host; runtime rebuild/install/restart and live model quality remain separate. Roll back this projection change to restore the prior inheritance behavior.
+
 ## 2026-10-11 — One authoritative session workspace statement
 
 - File Access Context states the session cwd with and without a host policy. Workspace Layout compares resolved directory identity and references that statement when the selected root matches, including relative cwd inputs; distinct selected roots remain explicit. Relative paths and task subdirectories keep their existing cwd semantics.

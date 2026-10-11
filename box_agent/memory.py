@@ -3544,7 +3544,10 @@ class MemoryRuntime:
                  "以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
                  + content + f"\n{_MEMORY_END}") if content.strip() else ""
         # 只替换本能力拥有的块；失败时清除旧值，避免身份或内容过期后仍被使用。
-        session.agent.set_system_prompt(place_memory_block(session.agent.system_prompt, block, reserve=True))
+        session.agent.set_system_prompt(
+            place_memory_block(session.agent.system_prompt, block, reserve=True),
+            preserve_child_prompt=True,
+        )
         session.memory_block = block or None
 
     def schedule(self, turn: _MemoryTurn) -> None:

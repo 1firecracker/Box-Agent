@@ -589,6 +589,7 @@ class Agent:
 
         # Only this host knows the exact rules it appended after caller input.
         self._system_prompt_tail = system_prompt[len(caller_system_prompt.rstrip()):]
+        self._child_system_prompt: str | None = None
         self.system_prompt = system_prompt
         from .plugins.defaults import _bind_skill_store, skill_loader_from_catalog
         loader = skill_loader_from_catalog(self.tools)
@@ -741,9 +742,16 @@ class Agent:
             return self.tools
         return self.mcp_tool_exposure.inherited_tools(self.tools)
 
-    def set_system_prompt(self, system_prompt: str) -> None:
+    def set_child_system_prompt(self, system_prompt: str) -> None:
+        """Bind a child view produced by shared session assembly."""
+        self._child_system_prompt = system_prompt
+        self._sync_child_system_prompt()
+
+    def set_system_prompt(self, system_prompt: str, *, preserve_child_prompt: bool = False) -> None:
         """Replace system rules; Skill reference text is projected separately."""
         self.system_prompt = system_prompt
+        if not preserve_child_prompt:
+            self._child_system_prompt = None
         if self.messages and self.messages[0].role == "system":
             self.messages[0] = Message(role="system", content=system_prompt)
         self._sync_child_system_prompt()
@@ -760,10 +768,18 @@ class Agent:
         return effective_system_prompt(prompt, suffixes)
 
     def _sync_child_system_prompt(self) -> None:
-        system_prompt = self._project_system_prompt(self.system_prompt, self.skill_runtime.legacy_system_suffixes)
+        suffixes = self.skill_runtime.legacy_system_suffixes
+        system_prompt = self._project_system_prompt(self.system_prompt, suffixes)
+        child_prompt = (
+            self._project_system_prompt(self._child_system_prompt + self._system_prompt_tail, suffixes)
+            if self._child_system_prompt is not None else system_prompt
+        )
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
-                tool.set_parent_system_prompt(system_prompt)
+                tool.set_parent_system_prompt(
+                    child_prompt if getattr(tool, "accepts_child_prompt_projection", False) is True
+                    else system_prompt
+                )
 
     def activate_skill_instructions(self, skill_name: str, skill_prompt: str) -> None:
         """Deprecated host API: select ordinary reference material for this turn."""

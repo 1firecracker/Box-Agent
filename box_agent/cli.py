@@ -2204,7 +2204,7 @@ async def run_agent(
                 agent.set_memory_proposal_negotiator(CLIMemoryProposalNegotiator(memory_mgr))
 
             def _set_agent_system_prompt(system_prompt: str) -> None:
-                agent.set_system_prompt(system_prompt)
+                agent.set_system_prompt(system_prompt, preserve_child_prompt=True)
 
             def _sync_cli_cache_fingerprint_context() -> None:
                 sync_skill_cache_fingerprint_context(

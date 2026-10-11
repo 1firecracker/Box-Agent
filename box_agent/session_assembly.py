@@ -395,8 +395,10 @@ async def prepare_prompt(resources: SessionResources) -> None:
         memory_block = await asyncio.to_thread(resources.memory_manager.recall) or None
         resources.state["memory_block"] = memory_block
 
+    child_segments: list[str] = []
     resources.system_prompt = build_session_prompt(
         config, template,
+        child_prompt_segments=child_segments,
         session_mode=options.session_mode,
         workspace=context.workspace,
         utility=options.utility,
@@ -416,6 +418,10 @@ async def prepare_prompt(resources: SessionResources) -> None:
             None if options.utility
             else frozenset(tool.name for tool in resources.tools)
         ),
+    )
+
+    resources.state["child_system_prompt"] = compose_prompt_segments(
+        child_segments[0], segments=child_segments[1:],
     )
 
 
@@ -454,7 +460,7 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
 
         relocated_prompt = move_skill_slot_to_end(agent.messages[0].content)
         if relocated_prompt != agent.messages[0].content:
-            agent.set_system_prompt(relocated_prompt)
+            agent.set_system_prompt(relocated_prompt, preserve_child_prompt=True)
         selector = SkillSelector(
             session_skill_loader,
             include_disabled=False,
@@ -469,7 +475,7 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
         if expert_context:
             expert_skill_prompt = selector.update(expert_context.skill_query(), refresh=False)
             if expert_skill_prompt is not None:
-                agent.set_system_prompt(expert_skill_prompt)
+                agent.set_system_prompt(expert_skill_prompt, preserve_child_prompt=True)
         session.skill_selector = selector
 
 
@@ -641,6 +647,21 @@ _MODE_PROMPT_MAP = {
 }
 
 
+def _child_prompt_template(template: str) -> str:
+    """Project only the packaged template before mixing in caller content."""
+    from .tools.skill_loader import SKILL_SLOT_SENTINEL
+
+    packaged = Path(__file__).with_name("config").joinpath("system_prompt.md").read_text(encoding="utf-8")
+    template = template.replace(SKILL_SLOT_SENTINEL, "{SKILLS_METADATA}")
+    if template in (packaged, packaged.replace("{SKILLS_METADATA}", "")):
+        template = template[template.index("## Working Guidelines\n"):]
+        start = template.index("<workflow>\n")
+        end = template.index("</workflow>", start) + len("</workflow>")
+        template = template[:start] + template[end:]
+    # These are builder-owned insertion slots, never a search over user data.
+    return template.replace("{SKILLS_METADATA}", "").replace("{MEMORY_CONTEXT}", "")
+
+
 def _compose_session_prompt(
     config, template: str, memory,
     session_mode: str | None,
@@ -657,6 +678,7 @@ def _compose_session_prompt(
     follow_up_suggestions_enabled: bool,
     host_ui_hints: bool,
     available_tools: frozenset[str] | None = None,
+    child_prompt_segments: list[str] | None = None,
 ) -> str:
     """Template plus the ordered session overlays shared by every adapter.
 
@@ -664,6 +686,7 @@ def _compose_session_prompt(
     unknown) gates tool-specific guidance so the prompt never instructs the
     model to call a tool this session lacks.
     """
+    child_template = _child_prompt_template(template) if child_prompt_segments is not None else ""
     if skills_slot:
         from .tools.skill_loader import SKILL_SLOT_SENTINEL
 
@@ -682,38 +705,50 @@ def _compose_session_prompt(
             else None,
         ),
     )
+    if child_prompt_segments is not None:
+        child_prompt_segments.append(compose_prompt_segments(
+            resolve_capability_placeholders(render_system_prompt_template(child_template), available_tools),
+            replacements={
+                "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
+                "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
+            },
+            segments=(PROJECT_WORKSPACE_MODE_PROMPT if session_mode == "code_agent" else None,),
+        ))
+
+    def append(segment: str | None, *, inherit: bool = True, skip_empty: bool = True) -> str:
+        if child_prompt_segments is not None and inherit and (segment or not skip_empty):
+            child_prompt_segments.append(segment or "")
+        return append_prompt_segment(base_prompt, segment, skip_empty=skip_empty)
+
     if workspace is not None:
-        base_prompt = append_prompt_segment(
-            base_prompt,
+        base_prompt = append(
             _filesystem_access_prompt(workspace, policy),
         )
         layout_prompt = _workspace_layout_prompt(
             workspace=workspace,
             layout=workspace_layout,
         )
-        base_prompt = append_prompt_segment(base_prompt, layout_prompt)
+        base_prompt = append(layout_prompt)
 
     if enable_general_directory_policy:
-        base_prompt = append_prompt_segment(
-            base_prompt, GENERAL_DIRECTORY_ORGANIZATION_PROMPT,
+        base_prompt = append(
+            GENERAL_DIRECTORY_ORGANIZATION_PROMPT,
         )
 
     if session_mode == "code_agent" and workspace is not None:
-        base_prompt = append_prompt_segment(
-            base_prompt,
+        base_prompt = append(
             build_project_startup_context_prompt(workspace),
         )
 
     env_prompt = build_env_context_prompt(env_context)
     if env_prompt:
-        base_prompt = append_prompt_segment(base_prompt, env_prompt)
+        base_prompt = append(env_prompt)
 
     runtime_context = skill_runtime_context or build_skill_runtime_context(
         sandbox_mode=sandbox_mode,
         env_context=env_context,
     )
-    base_prompt = append_prompt_segment(
-        base_prompt,
+    base_prompt = append(
         build_skill_runtime_prompt(runtime_context),
     )
 
@@ -722,12 +757,11 @@ def _compose_session_prompt(
     if host_ui_hints:
         hints_prompt = _build_action_hints_prompt(config, memory, env_context)
         if hints_prompt:
-            base_prompt = append_prompt_segment(base_prompt, hints_prompt)
+            base_prompt = append(hints_prompt, inherit=False)
 
     if follow_up_suggestions_enabled:
-        base_prompt = append_prompt_segment(
-            base_prompt,
-            build_follow_up_suggestions_prompt(),
+        base_prompt = append(
+            build_follow_up_suggestions_prompt(), inherit=False,
         )
 
     attr = _MODE_PROMPT_MAP.get(session_mode or "")
@@ -739,8 +773,7 @@ def _compose_session_prompt(
                 mode_prompt = resolve_capability_placeholders(
                     mode_path.read_text(encoding="utf-8").strip(), available_tools,
                 )
-                base_prompt = append_prompt_segment(
-                    base_prompt,
+                base_prompt = append(
                     mode_prompt,
                     skip_empty=False,
                 )
@@ -748,7 +781,7 @@ def _compose_session_prompt(
     if expert_context:
         expert_prompt = expert_context.render_prompt()
         if expert_prompt:
-            base_prompt = append_prompt_segment(base_prompt, expert_prompt)
+            base_prompt = append(expert_prompt)
     return base_prompt
 
 
@@ -771,6 +804,7 @@ def build_session_prompt(
     memory_block: str | None = None,
     prompt_suffix: str | None = None,
     available_tools: frozenset[str] | None = None,
+    child_prompt_segments: list[str] | None = None,
 ) -> str:
     """The one system-prompt builder for CLI, ACP and Python SDK sessions."""
     prompt = _compose_session_prompt(
@@ -789,6 +823,7 @@ def build_session_prompt(
         follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         host_ui_hints=host_ui_hints,
         available_tools=available_tools,
+        child_prompt_segments=child_prompt_segments,
     )
     from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
 
@@ -805,6 +840,8 @@ def build_session_prompt(
         )
     if prompt_suffix and prompt_suffix.strip():
         prompt = append_prompt_segment(prompt, prompt_suffix.strip())
+        if child_prompt_segments is not None:
+            child_prompt_segments.append(prompt_suffix.strip())
     return prompt
 
 

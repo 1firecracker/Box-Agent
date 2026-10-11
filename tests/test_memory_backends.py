@@ -1209,3 +1209,30 @@ async def test_full_save_queue_logs_abandonment_without_blocking_next_turn(tmp_p
         await session.aclose()
     assert saved == ["第一轮"]
     assert "abandoned_queue_full_or_closed" in caplog.text and "turn=two" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_external_memory_refresh_keeps_generated_child_prompt_private(tmp_path, memory_http):
+    config = session_config(tmp_path)
+    config.tools.enable_sub_agent = True
+    config.agent = backend_settings(tmp_path, enable_memory_extraction=False)
+    backend = create_memory_backend(config.agent)
+    llm = RecordingLLM("最终回答")
+    session = await AgentSession.open(
+        config=config,
+        host=HostBindings(llm_client=llm, memory_manager=backend,
+                          system_prompt="CALLER_SAFETY\n{MEMORY_CONTEXT}\nCALLER_RECOVERY"),
+        options=SessionOptions(workspace_dir=tmp_path, sandbox_mode=False),
+    )
+    try:
+        child = session.agent.tools["sub_agent"]
+        for index, profile in enumerate(("PRIVATE_PROFILE_ONE", "PRIVATE_PROFILE_TWO")):
+            memory_http.profile = profile
+            await run(session, "普通问题", f"run-{index}")
+            assert profile in session.agent.system_prompt
+            assert profile not in child._parent_system_prompt
+            assert "--- MEMORY START ---" not in child._parent_system_prompt
+            assert "CALLER_SAFETY" in child._parent_system_prompt
+            assert "CALLER_RECOVERY" in child._parent_system_prompt
+    finally:
+        await session.aclose()

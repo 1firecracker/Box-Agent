@@ -169,6 +169,9 @@ class AgentSession:
             **({"plugins": plugins} if plugins else {}),
             **capabilities,
         )
+        child_system_prompt = state.pop("child_system_prompt", None)
+        if child_system_prompt is not None and hasattr(agent, "set_child_system_prompt"):
+            agent.set_child_system_prompt(child_system_prompt)
         return cls(agent=agent, config=config, **state)
 
     @classmethod

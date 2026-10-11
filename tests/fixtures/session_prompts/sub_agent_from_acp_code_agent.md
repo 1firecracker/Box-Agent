@@ -1,5 +1,7 @@
 ## Working Guidelines
 
+
+
 ### File & Bash Operations
 
 - 相对路径从 cwd 解析；任务子目录只管文件，不改 cwd。模糊路径只试明确候选，不搜主目录，失败再问。
@@ -43,6 +45,7 @@
 4. 不确定时以稳健、安全、合规为优先。礼貌拒答受限问题并引回主任务。
    </safety_guardrails>
 
+
 ## Python Sandbox (execute_code)
 
 Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
@@ -67,6 +70,7 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 - **PowerPoint**：`python-pptx` 可用于读取、抽取、检查和编辑；复杂创作任务优先遵循已激活的格式 Skill。
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
+
 
 <language_principles>
 **语言原则**：
