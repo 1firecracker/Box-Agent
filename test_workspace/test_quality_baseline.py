@@ -189,7 +189,7 @@ def test_changed_input_bytes_are_unverified(attempt):
 def test_run_entry_uses_existing_acp_runner(monkeypatch):
     from test_workspace import run_acp_eval
     captured = []
-    monkeypatch.setattr(baseline, "source_identity", lambda: {})
+    monkeypatch.setattr(baseline, "source_identity", lambda *_: {})
     monkeypatch.setattr(run_acp_eval, "main", lambda args: captured.extend(args) or 2)
     assert baseline.main(["run", "--model", "fixture", "--case-id", "q0-file"]) == 2
     assert captured[captured.index("--timeout-seconds") + 1] == "180"
@@ -200,7 +200,7 @@ def test_run_entry_uses_existing_acp_runner(monkeypatch):
 def test_failed_preflight_records_unverified_without_exception_secrets(tmp_path, monkeypatch):
     from test_workspace import run_acp_eval
     monkeypatch.setattr(baseline, "ROOT", tmp_path)
-    monkeypatch.setattr(baseline, "source_identity", lambda: {"test_fixture": True})
+    monkeypatch.setattr(baseline, "source_identity", lambda *_: {"test_fixture": True})
     def fail(args):
         raise RuntimeError("sensitive example must not be copied")
     monkeypatch.setattr(run_acp_eval, "main", fail)
@@ -210,3 +210,293 @@ def test_failed_preflight_records_unverified_without_exception_secrets(tmp_path,
     assert report["counts"] == {"passed": 0, "failed": 0, "unverified": 1}
     assert baseline.read_json(directory / "summary.json")["model_calls"] == 0
     assert all("sensitive example" not in path.read_text() for path in directory.glob("*.json"))
+
+
+REGRESSION_PACK = baseline.ROOT / "test_workspace/inputs/prompt_regression"
+GIT_WRITE = next(rule["pattern"] for spec in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                 for rule in spec["checks"] if rule["kind"] == "tool_args_not_matching")
+
+
+@pytest.mark.parametrize("command,allowed", [
+    ("git status --short", True),
+    ("git diff calc.py && python -m pytest -q", True),
+    ("git log --oneline -3", True),
+    ("git add calc.py && git commit -m fix", False),
+    ("git commit --amend --no-edit", False),
+    ("git stash", False),
+    ("git checkout -- NOTES.md", False),
+    ("git reset --hard HEAD", False),
+    ("git clean -fd", False),
+])
+def test_git_write_oracle_rejects_commits_and_discards_only(attempt, command, allowed):
+    rule = {"kind": "tool_args_not_matching", "name": "bash", "argument": "command", "pattern": GIT_WRITE}
+    calls = [{"tool_name": "bash", "success": True, "arguments": {"command": command}}]
+    assert baseline.check_rule(rule, attempt, calls) is allowed
+
+
+def test_unknown_tool_oracle(attempt):
+    rule = {"kind": "no_unknown_tool"}
+    assert baseline.check_rule(rule, attempt, [{"tool_name": "read_file", "success": False, "error": "File not found"}])
+    assert not baseline.check_rule(rule, attempt, [{"tool_name": "glob", "success": False, "error": "Unknown tool: glob"}])
+
+
+def test_reply_and_contains_oracles(attempt):
+    (attempt / "workspace/calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    assert baseline.check_rule({"kind": "contains", "path": "calc.py", "value": "a + b"}, attempt, [])
+    assert not baseline.check_rule({"kind": "contains", "path": "calc.py", "value": "a - b"}, attempt, [])
+    assert baseline.check_rule({"kind": "reply_contains", "value": "done"}, attempt, [])
+    assert not baseline.check_rule({"kind": "reply_contains", "value": "report.py"}, attempt, [])
+
+
+def test_regression_pack_is_consistent():
+    dataset = [json.loads(line) for line in (REGRESSION_PACK / "dataset.jsonl").read_text(encoding="utf-8").splitlines()]
+    specs = baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+    assert [case["id"] for case in dataset] == [spec["id"] for spec in specs]
+    for case in dataset:
+        setup = case.get("workspace_setup", {})
+        for name in [*case["input_files"], *setup.get("files", []), *setup.get("dirty_files", [])]:
+            assert (REGRESSION_PACK / name).is_file(), name
+        # Regression cases test the prompt, so the query must not spell out the rule.
+        for phrase in ("query_jsonl", "request_user_input", "git", "不要提交", "glob", "grep"):
+            assert phrase not in case["query"], (case["id"], phrase)
+    for spec in specs:
+        assert {"kind": "no_unknown_tool"} in spec["checks"], spec["id"]
+
+
+def _fake_run(directory, case_id, quality_by_attempt):
+    for index, passed in enumerate(quality_by_attempt):
+        root = directory / f"cases/{case_id}/attempts/attempt-{index}"
+        (root / "workspace").mkdir(parents=True)
+        (root / "marker").write_text("pass" if passed else "fail", encoding="utf-8")
+
+
+def test_compare_reports_per_case_pass_rates_and_regressions(tmp_path, monkeypatch):
+    def fake_evaluate_run(directory, pack):
+        results = []
+        for case_dir in sorted((directory / "cases").iterdir()):
+            for attempt in sorted((case_dir / "attempts").iterdir()):
+                passed = (attempt / "marker").read_text(encoding="utf-8") == "pass"
+                results.append({"case_id": case_dir.name, "quality": "passed" if passed else "failed",
+                                "token_usage": {"totalTokens": 100 if passed else 300},
+                                "tool_calls": 2, "failed_tool_calls": 0 if passed else 1})
+        return {"results": results}
+
+    monkeypatch.setattr(baseline, "evaluate_run", fake_evaluate_run)
+    monkeypatch.setattr(baseline, "_comparison_context", lambda directory: {})
+    before, after = tmp_path / "before", tmp_path / "after"
+    _fake_run(before, "r-a", [True, False, False])
+    _fake_run(before, "r-b", [True, True, True])
+    _fake_run(after, "r-a", [True, True, True])
+    _fake_run(after, "r-b", [True, True, False])
+
+    report = baseline.compare_runs([before], [after], REGRESSION_PACK)
+    rows = {case["case_id"]: case for case in report["cases"]}
+
+    assert rows["r-a"]["baseline"]["passed"] == 1 and rows["r-a"]["candidate"]["passed"] == 3
+    assert rows["r-a"]["baseline"]["mean_tokens"] == 233.3
+    assert report["regressions"] == ["r-b"]
+    assert "| r-a | 1/3 (0) | 3/3 (0) |" in baseline.render_comparison(report)
+
+
+def test_model_provider_errors_are_unverified_not_failed(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={
+        "runStatus": "error", "errorDetails": {"source": "llm_provider", "httpStatus": 499},
+    })
+    write_json(attempt / "run.json", run)
+
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+
+    assert result["quality"] == "unverified"
+    assert result["reason"] == "model provider error: 499"
+
+
+def test_agent_errors_still_fail(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={"errorDetails": {"source": "tool"}})
+    write_json(attempt / "run.json", run)
+    write_json(attempt / "workspace/result.json", 391)
+
+    assert baseline.evaluate_attempt(attempt, completion_spec())["quality"] == "failed"
+
+
+def test_all_unverified_candidate_is_inconclusive(tmp_path, monkeypatch):
+    before, after = tmp_path / "before", tmp_path / "after"
+    monkeypatch.setattr(baseline, "evaluate_run", lambda directory, pack: {"results": [
+        {"case_id": "r-a", "quality": "passed" if directory == before else "unverified"},
+    ]})
+    monkeypatch.setattr(baseline, "_comparison_context", lambda directory: {})
+    report = baseline.compare_runs([before], [after], REGRESSION_PACK)
+    assert report["regressions"] == []
+    assert report["inconclusive"] == ["r-a"]
+    assert "inconclusive: r-a" in baseline.render_comparison(report)
+
+
+@pytest.mark.parametrize("source", ["files", "dirty_files"])
+def test_workspace_setup_bytes_must_match_pack(attempt, source):
+    record = {"input_files": [], "workspace_setup": {source: ["calc.py"]}}
+    write_json(attempt.parent.parent / "input.json", record)
+    write_json(attempt / "files-before.json", {"files": [{"path": "calc.py", "sha256": "wrong"}]})
+    spec = {"id": "r-fixture", "split": "regression", "checks": []}
+    result = baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)
+    assert result["quality"] == "unverified"
+    assert "invalid evidence" in result["reason"]
+
+
+def test_provider_error_does_not_hide_observed_git_violation(attempt):
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={
+        "errorDetails": {"source": "llm_provider", "httpStatus": 499},
+    })
+    write_json(attempt / "run.json", run)
+    trace = attempt / "agent/trace.jsonl"
+    with trace.open("a") as stream:
+        stream.write("\n" + json.dumps({"event": "tool.request", "tool_call_id": "bad", "data": {
+            "tool_name": "bash", "arguments": {"command": "git reset --hard HEAD"},
+        }}))
+    spec = {**completion_spec(), "checks": [{"kind": "tool_args_not_matching", "name": "bash",
+                                            "argument": "command", "pattern": GIT_WRITE}]}
+    result = baseline.evaluate_attempt(attempt, spec)
+    assert result["quality"] == "failed"
+    assert result["checks"] == [False]
+
+
+@pytest.mark.parametrize("content,expected", [
+    ("def add(a, b):\n    return a - b  # a + b\n\ndef multiply(a, b):\n    return a * b\n", False),
+    ("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return a - b\n", False),
+    ("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return a * b\n", True),
+])
+def test_git_dirty_oracle_checks_both_functions(attempt, content, expected):
+    (attempt / "workspace/calc.py").write_text(content, encoding="utf-8")
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-git-dirty")
+    checks = [r for r in spec["checks"] if r["kind"] in {"contains", "python_function"}]
+    assert all(baseline.check_rule(r, attempt, []) for r in checks) is expected
+
+
+@pytest.mark.parametrize("header,extra", [
+    ("def add(a: Number, b: Number):", ""),
+    ("def add(a, b) -> Number:", ""),
+    ("def add(a=missing, b=0):", ""),
+    ("def add(a, b):", "@missing\ndef helper():\n    return 0\n"),
+    ("def add(a, b):", "def helper(a=missing):\n    return 0\n"),
+    ("def add(a, b):", "def helper(*, a=missing):\n    return 0\n"),
+    ("def add(a, b):", "def helper(*args: Number, **kwargs: Number):\n    return 0\n"),
+    ("def add(a=missing, b=0):", "def add(a, b):\n    return a + b\n"),
+])
+def test_git_dirty_oracle_rejects_import_time_expressions(attempt, header, extra):
+    import hashlib
+    record = next(json.loads(line) for line in (REGRESSION_PACK / "dataset.jsonl").read_text().splitlines()
+                  if json.loads(line)["id"] == "r-git-dirty")
+    write_json(attempt.parent.parent / "input.json", record)
+    before = []
+    for name in [*record["workspace_setup"]["files"], *record["workspace_setup"]["dirty_files"]]:
+        content = (REGRESSION_PACK / name).read_bytes()
+        (attempt / "workspace" / name).write_bytes(content)
+        before.append({"path": name, "sha256": hashlib.sha256(content).hexdigest()})
+    write_json(attempt / "files-before.json", {"files": before})
+    (attempt / "workspace/calc.py").write_text(
+        header + "\n    return a + b\n\ndef multiply(a, b):\n    return a * b\n\n" + extra,
+        encoding="utf-8",
+    )
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-git-dirty")
+    result = baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)
+    assert result["quality"] == "failed"
+    assert not all(result["checks"])
+
+
+def test_image_oracle_requires_a_valid_png(attempt):
+    from PIL import Image
+    spec = next(s for s in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if s["id"] == "r-image-request")
+    assert not all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+    path = attempt / "workspace/cat.png"
+    path.write_bytes(b"not a PNG")
+    assert not all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+    Image.new("RGB", (2, 2)).save(path)
+    assert all(baseline.check_rule(r, attempt, []) for r in spec["checks"])
+
+
+@pytest.mark.parametrize("field", ["model_config_sha256", "runner_sha256", "python", "platform",
+                                   "profile_config_sha256", "environment", "oracle_sha256", "pack_sha256"])
+def test_compare_rejects_incompatible_contexts(tmp_path, monkeypatch, field):
+    before, after = tmp_path / "before", tmp_path / "after"
+    context = {"runner_sha256": "runner", "python": "3.13", "platform": "test",
+               "profile_config_sha256": None, "environment": {}, "oracle_sha256": "oracle",
+               "pack_sha256": "pack"}
+    for directory in (before, after):
+        write_json(directory / "baseline-context.json", context)
+        write_json(directory / "manifest.json", {"schema_version": "acp-eval/v1",
+                                                "model_config_sha256": "model"})
+    target = after / ("manifest.json" if field == "model_config_sha256" else "baseline-context.json")
+    data = baseline.read_json(target)
+    data[field] = "different"
+    write_json(target, data)
+    monkeypatch.setattr(baseline, "evaluate_run", lambda directory, pack: {"results": []})
+    with pytest.raises(ValueError, match="incompatible comparison context"):
+        baseline.compare_runs([before], [after], REGRESSION_PACK)
+
+
+def test_matching_workspace_fixture_can_be_changed_only_when_allowed(attempt):
+    import hashlib
+    source = (REGRESSION_PACK / "calc.py").read_bytes()
+    write_json(attempt.parent.parent / "input.json", {
+        "input_files": [], "workspace_setup": {"files": ["calc.py"]},
+    })
+    write_json(attempt / "files-before.json", {"files": [
+        {"path": "calc.py", "sha256": hashlib.sha256(source).hexdigest()},
+    ]})
+    spec = {"id": "r-fixture", "split": "regression", "checks": []}
+    target = attempt / "workspace/calc.py"
+    target.write_bytes(source)
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "passed"
+    target.write_text("changed", encoding="utf-8")
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "failed"
+    spec["mutable_inputs"] = ["calc.py"]
+    assert baseline.evaluate_attempt(attempt, spec, REGRESSION_PACK)["quality"] == "passed"
+
+
+def test_function_oracle_never_executes_captured_code(attempt):
+    marker = attempt / "executed"
+    (attempt / "workspace/calc.py").write_text(
+        f"open({str(marker)!r}, 'w').write('bad')\n"
+        "def add(a, b):\n    return a + b\n", encoding="utf-8",
+    )
+    rule = {"kind": "python_function", "path": "calc.py", "name": "add",
+            "parameters": ["a", "b"], "expression": "a + b"}
+    assert not baseline.check_rule(rule, attempt, [])
+    assert not marker.exists()
+
+
+def test_compare_requires_recorded_context(tmp_path):
+    directory = tmp_path / "legacy"
+    write_json(directory / "baseline-context.json", {})
+    write_json(directory / "manifest.json", {})
+    with pytest.raises(ValueError, match="missing comparison context"):
+        baseline.compare_runs([directory], [directory])
+
+
+@pytest.mark.parametrize("regressions,inconclusive,exit_code", [
+    ([], [], 0), (["r-a"], [], 1), ([], ["r-a"], 2),
+])
+def test_compare_exit_codes_distinguish_regression_and_inconclusive(monkeypatch, regressions, inconclusive, exit_code):
+    monkeypatch.setattr(baseline, "compare_runs", lambda *args: {
+        "cases": [], "regressions": regressions, "inconclusive": inconclusive,
+    })
+    assert baseline.main(["compare", "--baseline", "before", "--candidate", "after"]) == exit_code
+
+
+def test_jsonl_regression_preserves_original_record_format(attempt):
+    spec = next(case for case in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if case["id"] == "r-jsonl-implicit")
+    original = next(line for line in (REGRESSION_PACK / "records.jsonl").read_text().splitlines()
+                    if json.loads(line)["id"] == 731)
+    calls = [{"tool_name": "query_jsonl", "success": True}]
+    target = attempt / "workspace/selected.json"
+    target.write_text(json.dumps(json.loads(original), separators=(",", ":")), encoding="utf-8")
+    assert not all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
+    target.write_text(original + "\n", encoding="utf-8")
+    assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
+    target.write_text(original, encoding="utf-8")
+    assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])

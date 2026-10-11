@@ -5,6 +5,45 @@ from typing import Any, Literal, Mapping
 from acp_eval import SCHEMA_VERSION
 
 
+SESSION_MODES = frozenset({"general", "code_agent", "data_analysis"})
+
+
+@dataclass(frozen=True)
+class WorkspaceSetup:
+    """Project files placed in the workspace before the turn, never attached.
+
+    ``files`` are copied (by basename) and, with ``git_commit``, committed as
+    the repository baseline; ``dirty_files`` are copied afterwards so the tree
+    starts with uncommitted user work.
+    """
+
+    files: tuple[str, ...] = ()
+    git_commit: bool = False
+    dirty_files: tuple[str, ...] = ()
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "WorkspaceSetup":
+        value = record.get("workspace_setup", {})
+        if not isinstance(value, dict) or set(value) - {"files", "git_commit", "dirty_files"}:
+            raise ValueError("workspace_setup: unsupported fields or type")
+
+        def paths(key: str) -> tuple[str, ...]:
+            items = value.get(key, [])
+            if not isinstance(items, list) or not all(
+                isinstance(item, str) and item and "\x00" not in item for item in items
+            ):
+                raise ValueError(f"workspace_setup: {key} must be a list of paths")
+            return tuple(items)
+
+        git_commit = value.get("git_commit", False)
+        if not isinstance(git_commit, bool):
+            raise ValueError("workspace_setup: git_commit must be a boolean")
+        setup = cls(files=paths("files"), git_commit=git_commit, dirty_files=paths("dirty_files"))
+        if setup.git_commit and not setup.files:
+            raise ValueError("workspace_setup: git_commit needs files to commit")
+        return setup
+
+
 @dataclass(frozen=True)
 class CaseMetadata:
     """Explicit ACP controls supported by offline cases; identity stays runner-owned."""
@@ -25,9 +64,11 @@ class CaseMetadata:
             if key in values and not isinstance(values[key], bool):
                 raise ValueError(f"case metadata: {key} must be a boolean")
 
-        session = metadata("session_meta", {"deep_think"})
+        session = metadata("session_meta", {"deep_think", "session_mode"})
         prompt = metadata("prompt_meta", {"auto_approve_plan", "selected_skill_names"})
         boolean(session, "deep_think")
+        if "session_mode" in session and session["session_mode"] not in SESSION_MODES:
+            raise ValueError(f"case metadata: session_mode must be one of {sorted(SESSION_MODES)}")
         boolean(prompt, "auto_approve_plan")
         if "selected_skill_names" in prompt:
             names = prompt["selected_skill_names"]
