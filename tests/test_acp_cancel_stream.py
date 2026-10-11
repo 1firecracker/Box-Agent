@@ -87,14 +87,16 @@ async def test_acp_cancel_wakes_stalled_model_and_keeps_sessions_usable(tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_error", [False, True])
 @pytest.mark.parametrize("suggestions_enabled", [False, True])
+@pytest.mark.parametrize("startup_delay", [0, 2.1])
 async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
-    tmp_path, monkeypatch, cleanup_error, suggestions_enabled,
+    tmp_path, monkeypatch, cleanup_error, suggestions_enabled, startup_delay,
 ):
-    close_started, release_close, closed = (asyncio.Event() for _ in range(3))
+    stream_started, close_started, release_close, closed = (asyncio.Event() for _ in range(4))
     requests = 0
 
     class Body(httpx.AsyncByteStream):
         async def __aiter__(self):
+            stream_started.set()
             chunk = {
                 "id": "response-1", "object": "chat.completion.chunk",
                 "created": 0, "model": "test-model",
@@ -113,6 +115,7 @@ async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
 
     async def handler(request):
         nonlocal requests
+        await asyncio.sleep(startup_delay)
         requests += 1
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, stream=Body(),
@@ -157,6 +160,8 @@ async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
             sessionId=session.sessionId, prompt=[{"text": "hello"}],
         )))
         try:
+            # Cold session/provider startup is separate from the cleanup deadline.
+            await asyncio.wait_for(stream_started.wait(), 10)
             await asyncio.wait_for(close_started.wait(), 2)
             assert not pending.done(), "cancelled response must await HTTP cleanup"
             release_close.set()
