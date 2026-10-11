@@ -68,6 +68,11 @@ CASES = {
     "python_code_agent": ("python", "code_agent", False, False, False, FULL_TOOLS - {"execute_code"}),
     "acp_general_minimal_tools": ("acp", None, False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
+    "acp_code_agent_no_file_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS - {
+        "read_file", "search_files", "query_jsonl", "write_file", "edit_file", "append_file",
+    }),
+    "python_data_analysis_no_sandbox": ("python", "data_analysis", False, False, False,
+                                        FULL_TOOLS - {"execute_code"}),
 }
 
 

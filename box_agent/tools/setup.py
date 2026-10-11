@@ -130,8 +130,10 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
     return None if current_support is False else llm
 
 
-def build_sandbox_info_prompt() -> str:
-    """Build the sandbox prompt block for a cwd-rooted session."""
+def build_sandbox_info_prompt(tools: Collection[str] | None = None) -> str:
+    """Build the sandbox prompt block for the registered session tools."""
+    if tools is not None and "execute_code" not in tools:
+        return ""
     location_line = (
         "沙箱有独立 `sys.executable`，cwd 是当前会话工作目录；"
         "存盘路径由当前任务和用户要求决定，不要默认创建或使用 `output/` 目录；"
@@ -143,7 +145,7 @@ def build_sandbox_info_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。"
     )
 
-    return f"""
+    prompt = f"""
 ## Python Sandbox (execute_code)
 
 Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
@@ -169,6 +171,19 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
+    if tools is not None:
+        if "search_files" not in tools:
+            prompt = prompt.replace(location_line,
+                location_line.split("读取用户上传文件时", 1)[0]
+                + "读取用户上传文件时优先使用 host 提供的完整路径，缺少路径时请求确认，不猜测目录层级。")
+        lines = prompt.splitlines(keepends=True)
+        if not {"write_file", "read_file"} <= set(tools):
+            lines = [line for line in lines if not line.startswith("- **大文件落盘**")]
+        if "bash" not in tools:
+            lines = [line for line in lines if not line.startswith("- **用 bash**")]
+        prompt = "".join(lines)
+    return prompt
+
 
 
 def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
@@ -190,7 +205,7 @@ def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
         "使用 `lifetime=\"runtime\"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，"
         "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
     )
-    return (
+    prompt = (
         "- **目录**：bash、文件工具、" + ("`generate_image`、" if image else "") + "视觉检查和 Python 沙箱的相对路径"
         "均从当前会话工作目录开始。交付物位置由用户要求和当前任务决定；不要默认创建或使用 `output/`，"
         "也不要写到 `~/.box-agent/` 等内部目录。\n"
@@ -213,6 +228,17 @@ def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
         "例如 `zip -r bundle.zip 文件1 文件2`。"
         + (preview_guidance if background_shell else "")
     )
+    if tools is not None:
+        lines = prompt.splitlines(keepends=True)
+        if "search_files" not in tools:
+            lines = [line for line in lines if not line.startswith("- **附件定位**")]
+            lines.insert(2, "- **附件定位**：使用 host 提供的完整路径；路径缺失或读取失败时请用户确认，不猜测目录层级。\n")
+        if "publish_artifact" not in tools:
+            lines = [line for line in lines if not line.startswith("- **桌面交付**")]
+            lines.insert(3, "- **桌面交付**：说明已验证文件的位置；缺少登记能力时不要声称已发布。\n")
+        prompt = "".join(lines)
+    return prompt
+
 
 
 def image_generation_service_configured(
@@ -240,7 +266,7 @@ def build_image_generation_prompt(
     if tools is not None and "generate_image" not in tools:
         return (
             "## Native Image Generation\n\n"
-            "- 当前会话没有生图工具（Box-Agent 未配置 `image_generation.endpoint` 或对应环境变量）。"
+            "- 当前会话没有生图工具，不能通过该工具生成图片。"
             "用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，"
             "并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。"
         )

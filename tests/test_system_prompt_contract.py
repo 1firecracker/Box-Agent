@@ -5,12 +5,16 @@ from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.setup import render_system_prompt_template
 
 
-def _prompt() -> str:
+def _raw_prompt() -> str:
     return Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 
 
+def _prompt() -> str:
+    return resolve_capability_placeholders(_raw_prompt(), None)
+
+
 def test_system_prompt_keeps_the_stable_template_compact():
-    prompt = _prompt()
+    prompt = _raw_prompt()
 
     assert len(prompt) <= 4_300
     assert prompt.count("{SKILLS_METADATA}") == 1
@@ -45,7 +49,7 @@ def test_system_prompt_resolves_paths_without_broad_home_searches():
 
 
 def test_system_prompt_lets_the_model_choose_a_task_directory():
-    prompt = _prompt()
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "新建交付物前，先用 `search_files` 查看 cwd" in prompt
     assert "默认用 cwd" in prompt
@@ -126,7 +130,7 @@ def test_system_prompt_forbids_reusing_model_history_placeholders():
 
 
 def test_system_prompt_routes_large_jsonl_to_bounded_query_tool():
-    prompt = _prompt()
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "JSONL/NDJSON" in prompt
     assert "使用 `query_jsonl` 做字段投影和游标分页" in prompt

@@ -654,7 +654,7 @@ def _compose_session_prompt(
     base_prompt = compose_prompt_segments(
         resolve_capability_placeholders(render_system_prompt_template(template), available_tools),
         replacements={
-            "{SANDBOX_INFO}": build_sandbox_info_prompt() if sandbox_mode else "",
+            "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
             "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
         },
         segments=(

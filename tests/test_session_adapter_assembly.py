@@ -69,11 +69,11 @@ async def test_shared_assembly_passes_session_mode_to_workspace_tools(tmp_path):
     )
     try:
         assert received and received[0]["session_mode"] == "code_agent"
-        assert "已知文件路径" in session.agent.system_prompt
+        assert "缺少读取或搜索能力时明确说明验证边界" in session.agent.system_prompt
         assert "开放式项目分析" in session.agent.system_prompt
         assert "截断或超时" in session.agent.system_prompt
-        assert "find . -mindepth 1 -maxdepth 1 -print" in session.agent.system_prompt
-        assert "Get-ChildItem -Name" in session.agent.system_prompt
+        assert "使用 Bash 执行" not in session.agent.system_prompt
+        assert "当前会话没有 shell 执行能力" in session.agent.system_prompt
     finally:
         await session.aclose()
 

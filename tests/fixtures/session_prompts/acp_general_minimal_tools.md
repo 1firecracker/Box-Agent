@@ -75,7 +75,6 @@ Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 
 - **单次代码大小**：每次 `execute_code(code=...)` 控制在 8000 字符以内；大脚本/模板/数据要预先分段执行，最后再读取校验；不要等到 `EXECUTE_CODE_TOO_LARGE` 后才拆，也不要把大段内容塞进一个工具参数。生成静态内容（共享样式/HTML/CSS/JS/JSON manifest/base64/生成文件正文）时，除非必须用 Python 处理，否则不要把正文塞进 `execute_code`。
 - **大文件落盘**：小文件用 `write_file(path, content)` 一次写完；若预计单次模型输出容纳不下，就对同一路径按顺序调用 `write_file`，首块用 `chunk_index=0, final=false`，后续逐次递增索引，最后一块用 `final=true`。每个生成块建议不超过 5,500 字符。禁止把文件正文、heredoc 或 base64 载荷塞进 `bash`；最后用 `read_file` 或渲染检查校验。
 - **必须执行**：用户要求“用/使用/运行 Python”得到一个具体结果（如生成随机数、计算数值、处理数据/文件、运行脚本）时，必须调用 `execute_code` 返回真实执行结果；不要只给代码示例。只有用户明确问“怎么写/示例代码/解释代码”时才只返回代码。
-- **用 bash**：仓库代码编辑、测试/构建、系统命令、git——与沙箱无关。
 
 ### 文档处理优先级
 
@@ -176,4 +175,4 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
 ## Native Image Generation
 
-- 当前会话没有生图工具（Box-Agent 未配置 `image_generation.endpoint` 或对应环境变量）。用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。
+- 当前会话没有生图工具，不能通过该工具生成图片。用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。

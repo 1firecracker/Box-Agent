@@ -6,6 +6,13 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-11 — Prompt guidance follows registered session capabilities
+
+- Shared prompt assembly renders owned placeholders from the actual registered tool names. File reads/searches, chunked writes, code-mode directory inspection, analysis execution, publishing and user-decision guidance degrade when their tools are unavailable. Sandbox guidance also respects restricted file and shell capabilities.
+- A missing image tool is reported as unavailable in this session without claiming its service endpoint is unconfigured. Full-capability and compatibility (`available_tools=None`) text remains unchanged; restricted-session snapshots and real registration/assembly tests cover the changed behavior.
+- Caller-supplied prepared prompts and legacy templates without these placeholders remain caller-owned; no heading-based or regex filtering is applied. No new dependency, configuration default or persistence migration. External memory slot placement and cancellation are unchanged.
+- Validation stops at source and Python distribution build until a consuming host is rebuilt, installed and restarted. Revert the prompt capability change to roll back the generated guidance.
+
 ## 2026-10-11 — External memory delegation and config-output safety
 
 - Follow-up to PR #191: classify same-named memory tools by their live implementation. Remote reads/searches require network; remote core mutations also require external-side-effect permission. Same-named MCP/foreign tools cannot borrow local memory traits. Preserve local memory/correction permissions and the fail-closed public delegation policy.
