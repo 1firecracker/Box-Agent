@@ -510,7 +510,7 @@ def _workspace_layout_prompt(
         "selectedRootDir",
     ) or workspace
     cwd_rule = "工具相对路径和 artifact 扫描都从该目录开始；会话生命周期内不得改变它。"
-    if Path(selected_root) == Path(workspace):
+    if selected_root.resolve() == workspace.resolve():
         # Same directory: point at the File Access Context statement instead of
         # repeating the path.
         root_lines = [
@@ -520,7 +520,7 @@ def _workspace_layout_prompt(
     else:
         root_lines = [
             f"- 工作区（selected workspace root）：`{selected_root}`",
-            f"- 当前会话工作目录（cwd）：`{workspace}`。" + cwd_rule,
+            f"- 当前会话工作目录（cwd）：`{workspace.absolute()}`。" + cwd_rule,
         ]
     lines = [
         "## Workspace Layout",

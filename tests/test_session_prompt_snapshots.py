@@ -108,7 +108,7 @@ def pinned_environment(monkeypatch):
     monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _ctx: SKILL_RUNTIME_MARKER)
 
 
-async def _assemble(name: str, workspace: Path) -> str:
+async def _assemble(name: str, workspace: Path, *, workspace_layout=None) -> str:
     profile, session_mode, utility, sandbox_mode, follow_up, tools = CASES[name]
     config = Config(
         llm=LLMConfig(api_key="test"),
@@ -137,6 +137,7 @@ async def _assemble(name: str, workspace: Path) -> str:
         profile=profile,
         effective_policy=policy,
         workspace_dir=workspace,
+        workspace_layout=workspace_layout,
         utility=utility,
         sandbox_mode=sandbox_mode,
         session_mode=session_mode,
@@ -254,8 +255,9 @@ def test_agent_states_actual_workspace_when_custom_statement_does_not_match(tmp_
 
 @pytest.mark.parametrize("name", ["python_general", "acp_general_with_policy"])
 @pytest.mark.parametrize("relative_workspace", [".", "workspace"])
+@pytest.mark.parametrize("explicit_selected_root", [False, True])
 async def test_relative_workspace_has_one_absolute_cwd_statement(
-    name, relative_workspace, tmp_path, monkeypatch, pinned_environment,
+    name, relative_workspace, explicit_selected_root, tmp_path, monkeypatch, pinned_environment,
 ):
     from box_agent.agent import Agent
     from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
@@ -263,7 +265,8 @@ async def test_relative_workspace_has_one_absolute_cwd_statement(
     monkeypatch.chdir(tmp_path)
     workspace = Path(relative_workspace)
     workspace.mkdir(exist_ok=True)
-    prompt = await _assemble(name, workspace)
+    layout = {"selectedRootDir": str(workspace.resolve())} if explicit_selected_root else None
+    prompt = await _assemble(name, workspace, workspace_layout=layout)
     agent = Agent(
         llm_client=object(), tools=[], workspace_dir=str(workspace), system_prompt=prompt,
     )
@@ -288,3 +291,22 @@ def test_relative_workspace_and_absolute_policy_root_are_not_repeated(tmp_path, 
 
     assert prompt.count(str(workspace.absolute())) == 1
     assert "include the current workspace." in prompt
+
+
+@pytest.mark.parametrize("name", ["python_general", "acp_general_with_policy"])
+async def test_relative_workspace_keeps_a_distinct_selected_root(
+    name, tmp_path, monkeypatch, pinned_environment,
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = Path("workspace")
+    workspace.mkdir()
+    selected_root = tmp_path / "project"
+    selected_root.mkdir()
+
+    prompt = await _assemble(
+        name, workspace, workspace_layout={"selectedRootDir": str(selected_root)},
+    )
+
+    assert f"selected workspace root）：`{selected_root}`" in prompt
+    assert f"当前会话工作目录（cwd）：`{workspace.absolute()}`" in prompt
+    assert "就是当前会话工作目录" not in prompt
