@@ -547,7 +547,12 @@ class Agent:
         caller_system_prompt = system_prompt
         # Session-assembled prompts already state the cwd once in File Access
         # Context; only caller-supplied prompts without it get this section.
-        if "Current Workspace" not in system_prompt and WORKSPACE_STATEMENT_PREFIX not in system_prompt:
+        workspace_statement = f"{WORKSPACE_STATEMENT_PREFIX}{self.workspace_dir.absolute()}`"
+        has_workspace_statement = any(
+            line.startswith(workspace_statement)
+            for line in system_prompt.splitlines()
+        )
+        if "Current Workspace" not in system_prompt and not has_workspace_statement:
             workspace_info = (
                 f"\n\n## Current Workspace\n"
                 f"You are currently working in: `{self.workspace_dir.absolute()}`\n"

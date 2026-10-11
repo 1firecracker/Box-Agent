@@ -235,3 +235,18 @@ async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_
     assert "## Current Workspace" not in stated.messages[0].content
     assert stated.messages[0].content.count(str(tmp_path)) == 1
     assert "## Current Workspace" in unstated.messages[0].content
+
+
+@pytest.mark.parametrize("statement", [
+    "- Current workspace: `/another/project`.",
+    "- Current workspace: `{workspace}/nested`.",
+    "Quoted example: - Current workspace: `{workspace}`.",
+])
+def test_agent_states_actual_workspace_when_custom_statement_does_not_match(tmp_path, statement):
+    from box_agent.agent import Agent
+
+    prompt = "Caller constraints\n" + statement.format(workspace=tmp_path)
+    agent = Agent(llm_client=object(), tools=[], workspace_dir=str(tmp_path), system_prompt=prompt)
+
+    assert agent.messages[0].content.startswith(prompt)
+    assert f"You are currently working in: `{tmp_path}`" in agent.messages[0].content
