@@ -266,6 +266,8 @@ class SubAgentTool(EventEmittingTool):
         with bind_budgets(budgets):
             return await super()._invoke_validated(arguments, context=context)
 
+    accepts_child_prompt_projection = True
+
     def __init__(
         self,
         *,
