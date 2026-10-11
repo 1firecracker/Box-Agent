@@ -51,6 +51,11 @@ of every commit.
 - Caller-supplied prepared prompts and legacy templates without these placeholders remain caller-owned; no heading-based or regex filtering is applied. No new dependency, configuration default or persistence migration. External memory slot placement and cancellation are unchanged.
 - Validation stops at source and Python distribution build until a consuming host is rebuilt, installed and restarted. Revert the prompt capability change to roll back the generated guidance.
 
+## 2026-10-11 — Explicit JSON Pointer examples for query_jsonl
+
+- Tool and parameter descriptions explicitly require a leading `/` for both projections and filters, reject plain/hash/dotted field syntax, and include an executable example. Query execution, schema constraints, pagination and source-file safety are unchanged.
+- Regression tests exercise the documented call and existing invalid-pointer rejection. Real-model ACP comparisons report intermediate pointer errors separately from final task success; small samples do not establish a general cost improvement.
+
 ## 2026-10-11 — External memory delegation and config-output safety
 
 - Follow-up to PR #191: classify same-named memory tools by their live implementation. Remote reads/searches require network; remote core mutations also require external-side-effect permission. Same-named MCP/foreign tools cannot borrow local memory traits. Preserve local memory/correction permissions and the fail-closed public delegation policy.

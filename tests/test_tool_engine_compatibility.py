@@ -127,6 +127,9 @@ _TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
 _BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/background_output_schema_changes.json").read_text()
 )
+_JSONL_DESCRIPTION_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/jsonl_description_changes.json").read_text()
+)
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
         encoding="utf-8"
@@ -374,6 +377,7 @@ def _assert_schema_contract(tools, profile):
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
             *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
+            *_JSONL_DESCRIPTION_CHANGES.get(tool.name, ()),
         ):
             target = entry["schema"]
             *parents, field = change["path"]

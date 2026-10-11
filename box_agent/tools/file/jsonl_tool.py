@@ -204,7 +204,10 @@ class JsonlQueryTool(ReadTool):
             "Stream and inspect a JSONL/NDJSON file with bounded structured output. Use this "
             "instead of read_file or execute_code when JSONL records may be large. Optionally "
             "filter exact scalar values with where (RFC 6901 JSON Pointer keys) and return only "
-            "selected fields. Results remain valid JSON; oversized values are replaced by "
+            "selected fields. Every fields entry and where key must start with '/' (no leading whitespace): use '/id', "
+            "not 'id' or '#id'; use '/data/error' for a nested field. "
+            'Example: {"path":"events.jsonl","fields":["/id","/data/error"],"where":{"/id":42}}. '
+            "Results remain valid JSON; oversized values are replaced by "
             "explicit summaries with original sizes. Continue with next_cursor until has_more "
             "is false. The source file is never modified."
         )
@@ -230,16 +233,19 @@ class JsonlQueryTool(ReadTool):
                     "type": "array",
                     "items": {"type": "string", "pattern": "^/"},
                     "description": (
-                        "Optional RFC 6901 JSON Pointers to return, for example "
-                        "['/event', '/timestamp', '/data/error']"
+                        "Optional RFC 6901 JSON Pointers to return. Each must start with '/' "
+                        "without leading whitespace: "
+                        "use '/id', not 'id' or '#id'. Nested fields use '/data/error', not "
+                        "'data.error'. Example: ['/event', '/timestamp', '/data/error']"
                     ),
                     "maxItems": 50,
                 },
                 "where": {
                     "type": "object",
                     "description": (
-                        "Optional exact scalar filters keyed by JSON Pointer, for example "
-                        "{'/event': 'tool.response', '/data/success': false}"
+                        "Optional exact scalar filters keyed by JSON Pointer. Every key must "
+                        "start with '/' without leading whitespace: for id=42 use {'/id': 42}, not {'id': 42} or "
+                        "{'#id': 42}. Nested example: {'/data/success': false}"
                     ),
                     "additionalProperties": scalar_schema,
                 },
