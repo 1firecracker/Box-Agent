@@ -15,10 +15,15 @@ from __future__ import annotations
 
 import re
 
-_MIN_LETTERS = 20
+# About six English words: short continuations ("continue after restart") carry no
+# deliverable and should not gain a hint.
+_MIN_LETTERS = 30
 _MAX_CJK_SHARE = 0.1
-# Spans that say nothing about the user's language: code, URLs, paths, tags.
-_NOISE = re.compile(r"```.*?```|`[^`]*`|https?://\S+|(?:[\w.-]+/)+[\w.-]+|<[^>]+>", re.DOTALL)
+# Spans that say nothing about the user's language: code, URLs, paths, tags,
+# and slash commands such as "/pptx".
+_NOISE = re.compile(
+    r"```.*?```|`[^`]*`|https?://\S+|(?:[\w.-]+/)+[\w.-]+|<[^>]+>|(?<!\S)/[\w-]+", re.DOTALL,
+)
 
 _HINTS = {
     "English": (
