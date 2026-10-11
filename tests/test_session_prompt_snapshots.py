@@ -408,3 +408,28 @@ async def test_agent_hands_sub_agent_the_projected_parent_prompt(tmp_path, pinne
     assert "<workflow>" not in inherited and "--- MEMORY START ---" not in inherited
     assert "<safety_guardrails>" in inherited and f"- Current workspace: `{workspace}`" in inherited
     assert len(inherited) < 0.75 * len(agent.messages[0].content)
+
+
+@pytest.mark.parametrize("marketplace", [True, False])
+async def test_skill_sourcing_rule_is_stated_once(tmp_path, marketplace):
+    """Real ACP session: with the marketplace, its capability-gap suffix states the
+    sourcing rule, so the template line is dropped instead of repeated."""
+    from types import SimpleNamespace
+
+    from box_agent.acp import BoxACPAgent
+    from box_agent.tools.skillhub_search_tool import SKILL_SOURCE_DISCOVERY_PROMPT
+    from tests.test_acp import DoneLLM, DummyConn
+
+    config = Config(llm=LLMConfig(api_key="test"),
+                    agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
+                    tools=ToolsConfig(enable_mcp=False, enable_skills=False))
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], _template())
+    meta = {"host_capabilities": {"skillhub_search": 1}} if marketplace else {}
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta=meta))
+    prompt = agent._sessions[session.sessionId].agent.system_prompt
+
+    assert ("search_skillhub" in agent._sessions[session.sessionId].agent.tools) is marketplace
+    assert prompt.count(SKILL_SOURCE_DISCOVERY_PROMPT) == (1 if marketplace else 0)
+    assert "不等于仅从 Skill 市场安装" not in prompt
+    assert ("未指定来源时搜索 GitHub 等公开来源并核对仓库与 SKILL.md" in prompt) is (not marketplace)
+    assert "design 改成 fast" not in prompt
