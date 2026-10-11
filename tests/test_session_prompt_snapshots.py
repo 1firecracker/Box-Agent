@@ -250,3 +250,41 @@ def test_agent_states_actual_workspace_when_custom_statement_does_not_match(tmp_
 
     assert agent.messages[0].content.startswith(prompt)
     assert f"You are currently working in: `{tmp_path}`" in agent.messages[0].content
+
+
+@pytest.mark.parametrize("name", ["python_general", "acp_general_with_policy"])
+@pytest.mark.parametrize("relative_workspace", [".", "workspace"])
+async def test_relative_workspace_has_one_absolute_cwd_statement(
+    name, relative_workspace, tmp_path, monkeypatch, pinned_environment,
+):
+    from box_agent.agent import Agent
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    monkeypatch.chdir(tmp_path)
+    workspace = Path(relative_workspace)
+    workspace.mkdir(exist_ok=True)
+    prompt = await _assemble(name, workspace)
+    agent = Agent(
+        llm_client=object(), tools=[], workspace_dir=str(workspace), system_prompt=prompt,
+    )
+
+    content = agent.messages[0].content
+    assert content.count(str(workspace.absolute())) == 1
+    assert f"{WORKSPACE_STATEMENT_PREFIX}{workspace.absolute()}`" in content
+    assert "## Current Workspace" not in content
+
+
+def test_relative_workspace_and_absolute_policy_root_are_not_repeated(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = Path("workspace")
+    policy = CapabilityPolicy().with_filesystem_overrides(
+        session_workspace_root=str(workspace.absolute()),
+        allowed_directories=[str(workspace), str(workspace.absolute())],
+        filesystem_scope="session_workspace",
+        replace_allowed_directories=True,
+    )
+
+    prompt = session_assembly._filesystem_access_prompt(workspace, policy)
+
+    assert prompt.count(str(workspace.absolute())) == 1
+    assert "include the current workspace." in prompt

@@ -545,7 +545,7 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     # here by name, and Agent skips its own "## Current Workspace" tail when it
     # sees this line (WORKSPACE_STATEMENT_PREFIX).
     workspace_line = (
-        f"{WORKSPACE_STATEMENT_PREFIX}{workspace}`. This is the stable session cwd and default "
+        f"{WORKSPACE_STATEMENT_PREFIX}{workspace.absolute()}`. This is the stable session cwd and default "
         "working root: relative tool paths resolve from it, and task subdirectories you "
         "create organize files without changing it.\n"
     )
@@ -564,10 +564,10 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     for directory in policy.allowed_directories:
         allowed_roots.append(Path(directory).expanduser())
 
-    seen: set[str] = {str(workspace)}
+    seen: set[str] = {str(workspace.absolute())}
     root_lines: list[str] = []
     for root in allowed_roots:
-        root_s = str(root)
+        root_s = str(root.absolute())
         if root_s not in seen:
             seen.add(root_s)
             root_lines.append(f"- `{root_s}`")

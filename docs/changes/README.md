@@ -9,7 +9,7 @@ of every commit.
 ## 2026-10-11 — One authoritative session workspace statement
 
 - File Access Context states the session cwd with and without a host policy. Workspace Layout references that statement when the selected root matches; distinct selected roots remain explicit. Relative paths and task subdirectories keep their existing cwd semantics.
-- Agent omits its fallback workspace tail only for a matching cwd statement, preserving the fallback for custom prompts with another path or a quoted example. Filesystem permissions, runtime cwd and artifact scanning are unchanged.
+- Agent omits its fallback workspace tail only for a matching cwd statement, preserving the fallback for custom prompts with another path or a quoted example. Relative workspace and policy-root paths are displayed as absolute paths so equivalent roots do not repeat. Filesystem permissions, runtime cwd and artifact scanning are unchanged.
 - Source tests and Python distribution validation do not update a consuming desktop runtime. No new configuration, dependencies or migration; revert this prompt change to restore prior wording.
 
 ## 2026-10-11 — Prompt guidance follows registered session capabilities
