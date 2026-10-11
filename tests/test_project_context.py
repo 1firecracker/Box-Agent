@@ -74,8 +74,8 @@ def test_acp_session_prompt_builder_preserves_overlay_order(monkeypatch, tmp_pat
         agent=SimpleNamespace(code_prompt_path=None, analysis_prompt_path=None),
     )
 
-    monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda: "sandbox")
-    monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda: "delivery")
+    monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda *_args: "sandbox")
+    monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda *_: "delivery")
     monkeypatch.setattr(session_assembly, "_workspace_layout_prompt", lambda **_: "layout")
     monkeypatch.setattr(session_assembly, "build_project_startup_context_prompt", lambda _: "startup")
     monkeypatch.setattr(session_assembly, "build_env_context_prompt", lambda _: "env")
@@ -238,8 +238,8 @@ def test_acp_session_prompt_renders_current_date_per_session(monkeypatch) -> Non
             return today["value"]
 
     monkeypatch.setattr(setup, "date", FakeDate)
-    monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda: "sandbox")
-    monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda: "delivery")
+    monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda *_args: "sandbox")
+    monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda *_: "delivery")
     monkeypatch.setattr(session_assembly, "build_env_context_prompt", lambda _: "")
     monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _: "")
     monkeypatch.setattr(session_assembly, "_build_action_hints_prompt", lambda *_: "")

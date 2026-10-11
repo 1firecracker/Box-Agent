@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Collection
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional
@@ -129,8 +130,10 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
     return None if current_support is False else llm
 
 
-def build_sandbox_info_prompt() -> str:
-    """Build the sandbox prompt block for a cwd-rooted session."""
+def build_sandbox_info_prompt(tools: Collection[str] | None = None) -> str:
+    """Build the sandbox prompt block for the registered session tools."""
+    if tools is not None and "execute_code" not in tools:
+        return ""
     location_line = (
         "沙箱有独立 `sys.executable`，cwd 是当前会话工作目录；"
         "存盘路径由当前任务和用户要求决定，不要默认创建或使用 `output/` 目录；"
@@ -142,7 +145,7 @@ def build_sandbox_info_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。"
     )
 
-    return f"""
+    prompt = f"""
 ## Python Sandbox (execute_code)
 
 Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
@@ -168,10 +171,30 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
+    if tools is not None:
+        if "search_files" not in tools:
+            prompt = prompt.replace(location_line,
+                location_line.split("读取用户上传文件时", 1)[0]
+                + "读取用户上传文件时优先使用 host 提供的完整路径，缺少路径时请求确认，不猜测目录层级。")
+        lines = prompt.splitlines(keepends=True)
+        if not {"write_file", "read_file"} <= set(tools):
+            lines = [line for line in lines if not line.startswith("- **大文件落盘**")]
+        if "bash" not in tools:
+            lines = [line for line in lines if not line.startswith("- **用 bash**")]
+        prompt = "".join(lines)
+    return prompt
 
 
-def build_file_delivery_prompt() -> str:
-    """Build file-delivery guidance for a cwd-rooted session."""
+
+def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
+    """Build file-delivery guidance for a cwd-rooted session.
+
+    ``tools`` is the session's registered tool names (``None`` = unknown, full
+    text). Mentions of ``generate_image`` and the background-shell preview
+    recipe are dropped when the session lacks those tools.
+    """
+    image = tools is None or "generate_image" in tools
+    background_shell = tools is None or {"bash", "bash_output", "bash_kill"} <= set(tools)
     preview_directory = '"$PWD"'
     preview_guidance = (
         "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 "
@@ -182,8 +205,8 @@ def build_file_delivery_prompt() -> str:
         "使用 `lifetime=\"runtime\"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，"
         "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
     )
-    return (
-        "- **目录**：bash、文件工具、`generate_image`、视觉检查和 Python 沙箱的相对路径"
+    prompt = (
+        "- **目录**：bash、文件工具、" + ("`generate_image`、" if image else "") + "视觉检查和 Python 沙箱的相对路径"
         "均从当前会话工作目录开始。交付物位置由用户要求和当前任务决定；不要默认创建或使用 `output/`，"
         "也不要写到 `~/.box-agent/` 等内部目录。\n"
         "- **命名与覆盖**：遵循现有项目约定；独立产物使用简短、语义明确的名称。"
@@ -195,15 +218,27 @@ def build_file_delivery_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
         "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
         "需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。"
-        "构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
-        "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
+        + ("构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
+           if image else "构建器已登记的成品已发布，无需重复登记。")
+        + "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
         "也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项"
         "独立交付结果，则也应登记。"
         "完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。\n"
         "- **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，"
         "例如 `zip -r bundle.zip 文件1 文件2`。"
-        + preview_guidance
+        + (preview_guidance if background_shell else "")
     )
+    if tools is not None:
+        lines = prompt.splitlines(keepends=True)
+        if "search_files" not in tools:
+            lines = [line for line in lines if not line.startswith("- **附件定位**")]
+            lines.insert(2, "- **附件定位**：使用 host 提供的完整路径；路径缺失或读取失败时请用户确认，不猜测目录层级。\n")
+        if "publish_artifact" not in tools:
+            lines = [line for line in lines if not line.startswith("- **桌面交付**")]
+            lines.insert(3, "- **桌面交付**：说明已验证文件的位置；缺少登记能力时不要声称已发布。\n")
+        prompt = "".join(lines)
+    return prompt
+
 
 
 def image_generation_service_configured(
@@ -219,8 +254,22 @@ def image_generation_service_configured(
 def build_image_generation_prompt(
     config: Config,
     env: Mapping[str, str] | None = None,
+    *,
+    tools: Collection[str] | None = None,
 ) -> str:
-    """Build the image-generation policy shared by CLI and ACP sessions."""
+    """Build the image-generation policy shared by CLI and ACP sessions.
+
+    With ``tools`` known and no ``generate_image`` registered, the model gets
+    a short "not available" note instead of instructions to call a tool that
+    does not exist in this session.
+    """
+    if tools is not None and "generate_image" not in tools:
+        return (
+            "## Native Image Generation\n\n"
+            "- 当前会话没有生图工具，不能通过该工具生成图片。"
+            "用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，"
+            "并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。"
+        )
     configured = image_generation_service_configured(config, env)
     status = (
         "已配置，可以调用 `generate_image`。"
