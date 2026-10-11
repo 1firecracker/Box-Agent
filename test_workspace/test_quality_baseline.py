@@ -453,3 +453,18 @@ def test_compare_exit_codes_distinguish_regression_and_inconclusive(monkeypatch,
         "cases": [], "regressions": regressions, "inconclusive": inconclusive,
     })
     assert baseline.main(["compare", "--baseline", "before", "--candidate", "after"]) == exit_code
+
+
+def test_jsonl_regression_preserves_original_record_format(attempt):
+    spec = next(case for case in baseline.read_json(REGRESSION_PACK / "oracles.json")["cases"]
+                if case["id"] == "r-jsonl-implicit")
+    original = next(line for line in (REGRESSION_PACK / "records.jsonl").read_text().splitlines()
+                    if json.loads(line)["id"] == 731)
+    calls = [{"tool_name": "query_jsonl", "success": True}]
+    target = attempt / "workspace/selected.json"
+    target.write_text(json.dumps(json.loads(original), separators=(",", ":")), encoding="utf-8")
+    assert not all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
+    target.write_text(original + "\n", encoding="utf-8")
+    assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])
+    target.write_text(original, encoding="utf-8")
+    assert all(baseline.check_rule(rule, attempt, calls) for rule in spec["checks"])

@@ -18,7 +18,8 @@ final output after a provider failure remains unverified. Before scoring, fixtur
 bytes (including workspace-only and dirty files) must match the capture. Inputs
 are preserved unless explicitly listed in `mutable_inputs`.
 
-The image oracle requires a valid nonempty `cat.png`. The arithmetic fixture is
+The JSONL oracle preserves the selected record text, allowing a final newline
+but rejecting reformatting of JSON. The image oracle requires a valid nonempty `cat.png`. The arithmetic fixture is
 checked structurally: `add(a, b)` must return `a + b`, and `multiply(a, b)` must
 return `a * b`, with no extra executable module statements. This deliberately
 narrow oracle does not execute model-generated Python and may reject equivalent
