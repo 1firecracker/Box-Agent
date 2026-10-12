@@ -157,6 +157,11 @@ class PublishArtifactTool(Tool):
                             output.flush()
                             os.fsync(output.fileno())
                         check_tool_cancellation()
+                        # Copying yields to scripts; recheck authority at the commit seam.
+                        if self.workspace_dir.resolve() != self.workspace_dir or target.resolve() != target:
+                            raise ValueError("Artifact destination changed during generation")
+                        if error := self._write_error(target, context):
+                            return error
                         before = before_write(target)
                         write_metadata(target, {"type": "artifact", "sha256": digest.hexdigest(),
                                                 "size_bytes": sealed.stat().st_size})

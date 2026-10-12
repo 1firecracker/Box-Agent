@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import stat
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,7 +23,11 @@ class FileWriteInvocationContext(ToolInvocationContext):
 def file_hash(target: Path) -> str | None:
     try:
         digest = hashlib.sha256()
-        with target.open('rb') as stream:
+        # A FIFO must not block the event loop while collecting optional evidence.
+        fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(fd, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise OSError('File version is unavailable for a non-regular file')
             for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                 digest.update(chunk)
         return digest.hexdigest()

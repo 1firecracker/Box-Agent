@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import hashlib
+import os
 import shlex
 import sys
 import textwrap
@@ -254,10 +255,77 @@ async def test_publish_destination_symlink_change_is_rejected(tmp_path):
     assert (tmp_path / 'peer.pdf').read_bytes() == b'peer'
 
 
+@pytest.mark.asyncio
+async def test_publish_rechecks_destination_after_async_sealing(tmp_path, monkeypatch):
+    workspace, outside = tmp_path / 'workspace', tmp_path / 'outside'
+    (workspace / 'output').mkdir(parents=True)
+    tool = PublishArtifactTool(workspace)
+    begin = await tool.invoke({'action': 'begin', 'path': 'output/report.pdf'})
+    Path(begin.raw_output['staging_path']).write_bytes(b'pdf')
+    original, moved = asyncio.to_thread, False
+    async def interleave(function, *args, **kwargs):
+        nonlocal moved
+        result = await original(function, *args, **kwargs)
+        if not moved:
+            moved = True
+            (workspace / 'output').rename(outside)
+            (workspace / 'output').symlink_to(outside, target_is_directory=True)
+        return result
+    monkeypatch.setattr(asyncio, 'to_thread', interleave)
+    result = await tool.invoke({'action': 'commit', 'write_id': begin.raw_output['write_id']})
+    assert not result.success and 'destination changed' in result.error
+    assert list(outside.iterdir()) == []
+    assert 'file_changes' not in (result.raw_output or {})
+    tool.cleanup_pending_writes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delegated', [False, True])
+async def test_publish_rechecks_permissions_and_scope_after_async_sealing(tmp_path, monkeypatch, delegated):
+    from box_agent.tools.file_change_receipts import FileWriteInvocationContext
+    allow = True
+    class Permissions:
+        def check(self, **kwargs):
+            return SimpleNamespace(allowed=allow, reason='denied', permission_request=None)
+    native = PublishArtifactTool(tmp_path, permission_engine=None if delegated else Permissions())
+    def validate_scope(target):
+        return None if allow else ToolResult(success=False, error='WRITE_SCOPE: scope changed')
+    context = FileWriteInvocationContext(validate_write_target=validate_scope) if delegated else None
+    begin = await native.invoke({'action': 'begin', 'path': 'allowed/report.pdf'}, context=context)
+    Path(begin.raw_output['staging_path']).write_bytes(b'pdf')
+    original = asyncio.to_thread
+    async def interleave(function, *args, **kwargs):
+        nonlocal allow
+        result = await original(function, *args, **kwargs)
+        allow = False
+        return result
+    monkeypatch.setattr(asyncio, 'to_thread', interleave)
+    result = await native.invoke({'action': 'commit', 'write_id': begin.raw_output['write_id']}, context=context)
+    assert not result.success
+    assert not (tmp_path / 'allowed/report.pdf').exists()
+    assert not list((tmp_path / 'allowed').iterdir())
+    native.cleanup_pending_writes()
+
+
 def test_acp_receipts_carry_session_task_and_turn():
     payload = _tool_result_raw_output({'file_changes_version': 2, 'file_changes': []}, '', None,
                                      session_id='session', task_id='task', turn_id='turn')
     assert payload['session_id'] == 'session' and payload['task_id'] == 'task' and payload['turn_id'] == 'turn'
+
+
+@pytest.mark.skipif(not hasattr(os, 'mkfifo'), reason='POSIX FIFO')
+def test_native_write_replaces_fifo_without_blocking_for_optional_evidence(tmp_path):
+    import subprocess
+    target = tmp_path / 'output.txt'
+    os.mkfifo(target)
+    source = (
+        'import asyncio; from box_agent.tools.file_tools import WriteTool; '
+        f'result = asyncio.run(WriteTool(workspace_dir={str(tmp_path)!r}).invoke('
+        "{'path':'output.txt','content':'own'})); "
+        "assert result.success, result.error; assert 'file_changes' not in (result.raw_output or {})"
+    )
+    subprocess.run([sys.executable, '-c', source], check=True, timeout=5)
+    assert target.read_text() == 'own'
 
 
 @pytest.mark.asyncio
