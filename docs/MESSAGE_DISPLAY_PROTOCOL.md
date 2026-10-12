@@ -18,6 +18,8 @@ process commentary. Preserve actionable cards and artifacts independently.
 Text truncation continuations reuse the preceding answer ID (including mid-word or code-fence continuations). Task continuation,
 recovery and autopilot produce new candidates. `InjectedMessageEvent.kind` carries
 the existing typed injection kind so adapters do not parse instruction text.
+Budget and no-progress advice preserve a pending explicit text continuation;
+these runtime nudges do not guarantee that the model will rewrite the full answer.
 A model-call `finish_reason=stop` alone never establishes finality.
 
 Failures, cancellations, waiting and exhausted budgets have no final IDs. Missing,

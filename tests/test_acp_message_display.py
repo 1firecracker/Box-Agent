@@ -26,6 +26,33 @@ def test_snapshot_only_continuation_preserves_answer_and_changes_output_identity
     assert display.receipt(completed=True, duration_ms=2)["finalMessageIds"] == [second["messageId"]]
 
 
+@pytest.mark.parametrize("kind", [InjectionKind.BUDGET, InjectionKind.NO_PROGRESS])
+def test_runtime_advice_preserves_pending_text_continuation(kind):
+    display = MessageDisplay()
+    first = display.observe(LLMOutputEvent(step=1, content="Hello wor"))
+    display.observe(MessageInjection(InjectionKind.TEXT_CONTINUATION, "continue").apply([]))
+    display.observe(MessageInjection(kind, "wrap up soon").apply([]))
+    second = display.observe(LLMOutputEvent(step=2, content="ld"))
+    assert first["messageId"] == second["messageId"]
+    assert first["outputId"] != second["outputId"]
+
+
+@pytest.mark.parametrize("kind", [
+    InjectionKind.USER_SUPPLEMENT,
+    InjectionKind.TASK_CONTINUATION,
+    InjectionKind.OUTPUT_RECOVERY,
+    InjectionKind.STREAM_RECOVERY,
+    InjectionKind.REQUEST_RECOVERY,
+])
+def test_new_task_or_recovery_cancels_pending_text_continuation(kind):
+    display = MessageDisplay()
+    first = display.observe(LLMOutputEvent(step=1, content="Hello wor"))
+    display.observe(MessageInjection(InjectionKind.TEXT_CONTINUATION, "continue").apply([]))
+    display.observe(MessageInjection(kind, "new answer").apply([]))
+    second = display.observe(LLMOutputEvent(step=2, content="Replacement"))
+    assert first["messageId"] != second["messageId"]
+
+
 @pytest.mark.parametrize("reason", [StopReason.CANCELLED, StopReason.ERROR, StopReason.MAX_TOKENS])
 def test_non_successful_done_cannot_classify_partial_text(reason):
     display = MessageDisplay()

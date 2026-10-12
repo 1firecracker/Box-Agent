@@ -63,11 +63,14 @@ class MessageDisplay:
             # Reuse the logical message ID for truncation: a continuation may
             # start in the middle of a word, table row or Markdown code fence.
             # Recovery keeps the failed partial text under a separate old ID.
-            self.message_id = (
-                self.answer_ids[-1]
-                if event.kind == InjectionKind.TEXT_CONTINUATION.value and self.answer_ids
-                else None
-            )
+            if event.kind == InjectionKind.TEXT_CONTINUATION.value:
+                self.message_id = self.answer_ids[-1] if self.answer_ids else None
+            elif event.kind not in {
+                InjectionKind.BUDGET.value, InjectionKind.NO_PROGRESS.value,
+            }:
+                self.message_id = None
+            # Advisory wrap-up nudges may arrive after the continuation request;
+            # they do not revoke its identity or guarantee a rewritten answer.
             self.output_id = None
             self.text_parts = []
         if isinstance(event, DoneEvent) and event.stop_reason == StopReason.END_TURN:
