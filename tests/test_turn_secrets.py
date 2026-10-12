@@ -106,3 +106,19 @@ def test_bearer_environment_references_do_not_trigger_credential_notice(referenc
     text = f'Authorization: Bearer {reference}'
     assert detect_credentials(text) == []
     assert credential_notice(text) is None
+
+
+@pytest.mark.parametrize('value', [TOKEN + ' with spaces', 'sk-live-' + 'fixture' * 6 + '=='])
+def test_token_shaped_password_is_detected_in_full_and_fully_masked(value):
+    text = f'password: "{value}"'
+    assert detect_credentials(text) == [value]
+    notice = credential_notice(text)
+    assert value[:8] not in notice and value[-4:] not in notice
+    assert '`****`' in notice
+
+
+def test_token_also_used_as_part_of_a_password_receives_a_fully_masked_notice():
+    text = f'API key: {TOKEN}\npassword: "{TOKEN} with spaces"'
+    notice = credential_notice(text)
+    assert TOKEN[:8] not in notice and TOKEN[-4:] not in notice
+    assert '`****`' in notice

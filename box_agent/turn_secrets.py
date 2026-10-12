@@ -54,7 +54,7 @@ def detect_credentials(text: str) -> list[str]:
             found.append((start, value))
     found.extend(_password_values(text))
     values: list[str] = []
-    for _, value in sorted(found):
+    for _, value in sorted(found, key=lambda item: (item[0], -len(item[1]))):
         if value not in values and not any(value in other or other in value for other in values):
             values.append(value)
     return values
@@ -72,7 +72,7 @@ def credential_notice(text: str) -> str | None:
     if not values:
         return None
     passwords = {value for _, value in _password_values(text)}
-    masked = "、".join(f"`{mask_credential(value, password=value in passwords)}`" for value in values)
+    masked = "、".join(f"`{mask_credential(value, password=any(value in password for password in passwords))}`" for value in values)
     return (
         f"[敏感信息：本条消息含疑似凭据（{masked}）。回复、写入的文件和执行的命令中都不要出现其完整值："
         "回复里需要指代时只用上面的脱敏形式；代码和配置改为从环境变量或配置项读取（如 `${DB_PASSWORD}`）；"
