@@ -943,7 +943,7 @@ def _tool_result_raw_output(
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
-        if session_id and payload.get("file_changes_version") == 1:
+        if session_id and payload.get("file_changes_version") in {1, 2}:
             payload.setdefault("session_id", session_id)
             payload.setdefault("sessionId", session_id)
         if task_id:
@@ -5017,9 +5017,9 @@ class BoxACPAgent:
                                     progress["event"] = "tool_result"
                                     progress["tool_name"] = name
                                     progress["success"] = ok
-                                    if isinstance(child_output, dict) and child_output.get("file_changes_version") == 1:
+                                    if isinstance(child_output, dict) and child_output.get("file_changes_version") in {1, 2}:
                                         receipt = _tool_result_raw_output(
-                                            {"file_changes_version": 1, "file_changes": child_output.get("file_changes")},
+                                            {"file_changes_version": child_output["file_changes_version"], "file_changes": child_output.get("file_changes")},
                                             "", None, session_id=state.upstream_session_id,
                                             task_id=task_context.task_id, turn_id=task_context.turn_id,
                                         )

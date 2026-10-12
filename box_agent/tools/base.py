@@ -26,6 +26,7 @@ class ToolResult(BaseModel):
     # Trusted invocation state, never inferred from tool-supplied raw output or
     # serialized into protocol/session-log payloads.
     _invocation_rejected: bool = PrivateAttr(default=False)
+    _written_file_sha256: str | None = PrivateAttr(default=None)
 
     success: bool
     content: str = ""

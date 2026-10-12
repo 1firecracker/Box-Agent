@@ -141,6 +141,10 @@ class _WriteScopedTool(Tool):
         return self._tool.parameters
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        if self.name == "publish_artifact":
+            context = (FileWriteInvocationContext(validate_write_target=self._write_scope_error)
+                       if kwargs.get("action") in {"begin", "commit", "abort"} else None)
+            return await self._tool.invoke(kwargs, context=context)
         path = kwargs.get("path")
         if not isinstance(path, str) or not path.strip():
             return ToolResult(
@@ -835,11 +839,11 @@ class SubAgentTool(EventEmittingTool):
         spec: DelegationSpec,
     ) -> dict[str, Tool]:
         scopes = spec.constraints.write_scope
-        if not scopes and "bash" not in tools:
+        if not scopes and "bash" not in tools and "publish_artifact" not in tools:
             return tools
         scoped: dict[str, Tool] = {}
         for name, tool in tools.items():
-            if name in {"write_file", "append_file", "edit_file"}:
+            if name in {"write_file", "append_file", "edit_file", "publish_artifact"}:
                 scoped[name] = _WriteScopedTool(tool, self._workspace_dir, scopes or ())
             elif name == "bash":
                 scoped[name] = _PermissionGatedBashTool(

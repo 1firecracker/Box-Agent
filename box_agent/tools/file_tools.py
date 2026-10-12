@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from ..events import ProgressEvent
 from ..model_history import is_model_history_placeholder
-from .file_change_receipts import FileChangeReceiptMixin
+from .file_change_receipts import FileChangeReceiptMixin, before_write, file_change_result
 from .base import EventEmittingTool, Tool, ToolResult
 from .argument_limits import MAX_GENERATED_BODY_CHARS
 from .file.path_candidates import home_relative_path_candidates
@@ -1095,6 +1095,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                 reason="pptx_self_check_bypass",
             )
         digest = self._sha256_file(state.temporary)
+        before = before_write(state.target)
         backup_path = backup_file(state.target)
         created = False
         try:
@@ -1127,6 +1128,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                 "backup_path": str(backup_path) if backup_path is not None else None,
             },
         )
+        result = file_change_result(result, self.workspace_dir.resolve(), state.target, before, digest)
         final_chunk_index = state.next_index - 1
         self._committed[state.target] = _CommittedTextWrite(
             final_chunk_index=final_chunk_index,
@@ -1171,7 +1173,12 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                         },
                     )
                 return None
-            return receipt.result.model_copy(deep=True)
+            replay = receipt.result.model_copy(deep=True)
+            raw = dict(replay.raw_output or {})
+            raw.pop("file_changes_version", None)
+            raw.pop("file_changes", None)
+            raw["replayed"] = True
+            return replay.model_copy(update={"raw_output": raw})
         if chunk_index > 0:
             return ToolResult(
                 success=False,
@@ -1411,7 +1418,9 @@ class AppendTool(FileChangeReceiptMixin, Tool):
             if size_error:
                 return ToolResult(success=False, content="", error=size_error)
 
-            existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            existed = file_path.exists()
+            original = file_path.read_bytes() if existed else b""
+            existing = original.decode("utf-8")
             bypass_error = detect_pptx_self_check_bypass(
                 str(file_path), f"{existing}\n{content}"
             )
@@ -1422,7 +1431,11 @@ class AppendTool(FileChangeReceiptMixin, Tool):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with file_path.open("a", encoding="utf-8") as f:
                 f.write(content)
-            return ToolResult(success=True, content=f"Successfully appended to {file_path}")
+            expected = original + content.replace("\n", os.linesep).encode("utf-8")
+            result = ToolResult(success=True, content=f"Successfully appended to {file_path}")
+            return file_change_result(result, self.workspace_dir.resolve(), file_path,
+                                      hashlib.sha256(original).hexdigest() if existed else None,
+                                      hashlib.sha256(expected).hexdigest(), verify_current=True)
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))
 
@@ -1530,7 +1543,8 @@ class EditTool(FileChangeReceiptMixin, Tool):
                     error=f"File not found: {path}",
                 )
 
-            content = file_path.read_text(encoding="utf-8")
+            original = file_path.read_bytes()
+            content = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
             placeholder_error = _model_history_placeholder_error(old_str, new_str)
             if placeholder_error:
@@ -1562,6 +1576,11 @@ class EditTool(FileChangeReceiptMixin, Tool):
             new_content = content.replace(old_str, new_str)
             file_path.write_text(new_content, encoding="utf-8")
 
-            return ToolResult(success=True, content=f"Successfully edited {file_path}")
+            return file_change_result(
+                ToolResult(success=True, content=f"Successfully edited {file_path}"),
+                self.workspace_dir.resolve(), file_path, hashlib.sha256(original).hexdigest(),
+                hashlib.sha256(new_content.replace("\n", os.linesep).encode("utf-8")).hexdigest(),
+                verify_current=True,
+            )
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))

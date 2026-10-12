@@ -24,7 +24,7 @@
 - **目录**：bash、文件工具、`generate_image`、视觉检查和 Python 沙箱的相对路径均从当前会话工作目录开始。交付物位置由用户要求和当前任务决定；不要默认创建或使用 `output/`，也不要写到 `~/.box-agent/` 等内部目录。
 - **命名与覆盖**：遵循现有项目约定；独立产物使用简短、语义明确的名称。仅在任务明确需要时覆盖目标文件，不重命名或覆盖无关文件。
 - **附件定位**：优先原样使用 host 提供的完整路径；若仅有文件名，或完整路径返回 `FileNotFoundError` / `No such file or directory`，不要猜测 `../` 层级；调用 `search_files`，以 `File Access Context` 中的 `Current workspace` 为 `path`、原文件名为 `pattern`、`target="files"` 精确定位。将搜索 `path` 与返回的相对路径拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。
-- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项独立交付结果，则也应登记。完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。
+- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。脚本生成自包含的单文件交付物时，可先用 `publish_artifact(action="begin", path=最终路径)` 获取 staging_path，生成并验证该临时文件后用返回的 write_id 调用 commit；最终路径不变，提交凭证确认归属；依赖相对资源目录的 HTML 或多文件构建器继续原有生成和发布流程。构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项独立交付结果，则也应登记。完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。
 - **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，例如 `zip -r bundle.zip 文件1 文件2`。
 - **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 loopback 的动态端口预览：`${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 --bind 127.0.0.1 --directory "$PWD"`，从 `bash_output` 读取实际端口后访问 `http://127.0.0.1:<port>/...`。模型仅为自己验证时使用 `lifetime="turn"`，验证后立即 `bash_kill`，任务结束时 runtime 会兜底回收；用户明确要求在最终回复后亲自访问服务（如“启动服务我看一下”）时，使用 `lifetime="runtime"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。
 

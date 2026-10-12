@@ -1377,6 +1377,13 @@ class Agent:
                 if callable(close):
                     await close()
             finally:
+                for name in ("staged_file_write", "publish_artifact"):
+                    cleanup = getattr(self.tools.get(name), "cleanup_pending_writes", None)
+                    if callable(cleanup):
+                        try:
+                            cleanup()
+                        except Exception as exc:
+                            _log.warning("%s pending write cleanup failed: %s", name, exc)
                 if own_injections is not None:
                     own_injections.end_run()
                 if (

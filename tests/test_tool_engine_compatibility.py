@@ -82,18 +82,27 @@ _PUBLISH_ARTIFACT_SCHEMA = {
             "After creating and checking a main user-facing file, declare it as "
             "a primary user-facing artifact. Call once for each requested deliverable. "
             "Already published builder outputs and images "
-            "do not need this call. Use it to promote selected intermediate files."
+            "do not need this call. Use it to promote selected intermediate files. "
+            "For a self-contained single-file script deliverable with verifiable ownership, first call "
+            "action=begin with its final path; generate and check the file at the returned "
+            "staging_path, then action=commit with the returned write_id. Only commit "
+            "replaces the final path and records generation. Plain publication never "
+            "proves who generated an existing file. HTML with relative assets and directory "
+            "builders must keep their existing generation/publication flow. Use action=abort to discard staging."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path inside the session workspace."},
+                "path": {"type": "string", "description": "Final file path inside the session workspace."},
+                "action": {"type": "string", "enum": ["publish", "begin", "commit", "abort"],
+                           "default": "publish"},
+                "write_id": {"type": "string", "description": "Exact transaction ID from begin."},
             },
-            "required": ["path"],
             "additionalProperties": False,
         },
     },
 }
+
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
 )
@@ -314,22 +323,6 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
-        if tool.name in {"bash", "execute_code"}:
-            entry["schema"]["input_schema"]["properties"]["changed_files"] = {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "maxItems": 256,
-                "uniqueItems": True,
-                "description": (
-                    "Optional optimization for large workspaces: declare ALL exact target file paths "
-                    "before execution (both paths for a rename). Omit for automatic workspace capture. "
-                    "Paths are relative to the session workspace, regardless of inline cd. "
-                    "Include script-generated outputs of any file type; never list read-only inputs, "
-                    "directories, glob patterns, or another task's files. Use [] for read-only calls. "
-                    "Only files whose bytes change receive task-bound file change receipts. "
-                    "Background execution cannot produce these receipts."
-                ),
-            }
         if tool.name == "bash":
             anchor = (
                 '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
