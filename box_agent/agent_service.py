@@ -114,12 +114,12 @@ class AgentService:
         # No await between the ownership check and runner reservation: another
         # start cannot append history or replace this handle in that interval.
         if request.user_message is not None:
-            from .turn_language import with_deliverable_language_hint
+            from .turn_hints import with_turn_hints
 
             skip_hint = (getattr(session, "utility_session", False)
                          or request.metadata.get("synthetic_continuation") is True)
             message = (request.user_message if skip_hint
-                       else with_deliverable_language_hint(request.user_message))
+                       else with_turn_hints(request.user_message))
             if validation is not None:
                 with runtime.reference_scope(validation):
                     session.agent.add_user_message(message)

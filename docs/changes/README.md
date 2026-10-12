@@ -6,6 +6,10 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-12 — Shared credential turn reminders
+
+- [Credential reminder behavior and limits](2026-10-12-turn-credential-hints.md): shared CLI/ACP/SDK generation, fully masked passwords, environment-reference exclusion, utility opt-out and the plaintext input/log boundary. Default enabled; source validation does not update installed hosts.
+
 ## 2026-10-11 — Child prompt projection with explicit ownership
 
 - Shared session assembly produces the child view before combining generated memory, image guidance and host UI overlays. Only the exact packaged template's role/workflow is omitted; custom templates, project instructions and recovery suffixes remain caller-owned. The parent prompt is unchanged.
