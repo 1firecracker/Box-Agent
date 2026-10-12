@@ -16,11 +16,15 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
-from .file_change_receipts import FileChangeReceiptMixin, CHANGED_FILES_PARAMETER
+from .file_change_receipts import (
+    FileChangeReceiptMixin, CHANGED_FILES_PARAMETER, SCRIPT_FILE_CHANGE_LEASE_ENV,
+    file_change_subprocess_env, script_file_change_scope,
+)
 from .base import Tool, ToolResult
 
 from box_agent.user_paths import state_path
@@ -223,8 +227,25 @@ def _execute_with_kernel_write_guard(
     code: str,
     timeout: int,
 ) -> tuple[str, list[str], Optional[str]]:
+    setup_code = _kernel_write_guard_setup_code(session.workspace)
+    cleanup_code = _KERNEL_WRITE_GUARD_DISABLE_CODE
+    lease_env = file_change_subprocess_env(None) or {}
+    if SCRIPT_FILE_CHANGE_LEASE_ENV in lease_env:
+        # Persistent kernels need the current lease for each cell, not the one
+        # inherited at startup. Restore the previous environment after the cell.
+        setup_code += (
+            f"\n_box_lease_previous = _box_guard_os.environ.get({SCRIPT_FILE_CHANGE_LEASE_ENV!r})\n"
+            f"_box_guard_os.environ[{SCRIPT_FILE_CHANGE_LEASE_ENV!r}] = "
+            f"{lease_env[SCRIPT_FILE_CHANGE_LEASE_ENV]!r}\n"
+        )
+        cleanup_code += (
+            f"\nif _box_lease_previous is None:\n"
+            f"    _box_guard_os.environ.pop({SCRIPT_FILE_CHANGE_LEASE_ENV!r}, None)\n"
+            f"else:\n"
+            f"    _box_guard_os.environ[{SCRIPT_FILE_CHANGE_LEASE_ENV!r}] = _box_lease_previous\n"
+        )
     setup_result = session.execute(
-        _kernel_write_guard_setup_code(session.workspace),
+        setup_code,
         timeout=min(timeout, 10),
     )
     if setup_result[2] is not None:
@@ -232,7 +253,7 @@ def _execute_with_kernel_write_guard(
     try:
         return session.execute(code, timeout)
     finally:
-        session.execute(_KERNEL_WRITE_GUARD_DISABLE_CODE, timeout=5)
+        session.execute(cleanup_code, timeout=5)
 
 # Whitelist of pip package names allowed for on-demand installation in
 # frozen/runtime mode.  Packages NOT in this set are rejected with a clear
@@ -1500,9 +1521,10 @@ class JupyterSandboxTool(FileChangeReceiptMixin, Tool):
         code: str,
         timeout: int,
     ) -> tuple[str, list[str], Optional[str]]:
-        if isinstance(session, JupyterKernelSession):
-            return _execute_with_kernel_write_guard(session, code, timeout)
-        return session.execute(code, timeout)
+        with script_file_change_scope(inherit_subprocesses=not isinstance(session, JupyterKernelSession)):
+            if isinstance(session, JupyterKernelSession):
+                return _execute_with_kernel_write_guard(session, code, timeout)
+            return session.execute(code, timeout)
 
     @property
     def name(self) -> str:
@@ -1709,7 +1731,7 @@ Output formats:
         _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
         loop = asyncio.get_event_loop()
         try:
-            worker = loop.run_in_executor(None, self._execute_session_code, session, code, timeout)
+            worker = loop.run_in_executor(None, copy_context().run, self._execute_session_code, session, code, timeout)
             stdout, images, error = await asyncio.wait_for(
                 asyncio.shield(worker), timeout=_EXEC_TIMEOUT,
             )
@@ -1722,7 +1744,7 @@ Output formats:
                     pip_name = self._MODULE_TO_PIP.get(pkg, pkg)
                     ok, _ = await env.install_packages([pip_name])
                     if ok:
-                        worker = loop.run_in_executor(None, self._execute_session_code, session, code, timeout)
+                        worker = loop.run_in_executor(None, copy_context().run, self._execute_session_code, session, code, timeout)
                         stdout, images, error = await asyncio.wait_for(
                             asyncio.shield(worker), timeout=_EXEC_TIMEOUT,
                         )

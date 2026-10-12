@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
-from .file_change_receipts import FileChangeReceiptMixin, CHANGED_FILES_PARAMETER, register_shell_writer
+from .file_change_receipts import (
+    FileChangeReceiptMixin, CHANGED_FILES_PARAMETER, register_shell_writer, file_change_subprocess_env,
+)
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
 from .pptx_safety import (
@@ -1109,6 +1111,7 @@ class BashTool(FileChangeReceiptMixin, Tool):
         PATH authoritative.
         """
         stderr = asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE
+        invocation_env = file_change_subprocess_env(self._subprocess_env)
         if self.is_windows:
             # Win-only: detach stdin so the child shell does not inherit the
             # ACP stdin pipe (parent box-agent-acp has stdio piped to Electron).
@@ -1119,8 +1122,8 @@ class BashTool(FileChangeReceiptMixin, Tool):
                 # mutating the cached ``_subprocess_env``. Fall back to the
                 # process env when no custom env was prepared.
                 spawn_env = (
-                    dict(self._subprocess_env)
-                    if self._subprocess_env is not None
+                    dict(invocation_env)
+                    if invocation_env is not None
                     else os.environ.copy()
                 )
                 if self._bundled_win_path_dirs:
@@ -1153,7 +1156,7 @@ class BashTool(FileChangeReceiptMixin, Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=invocation_env,
             ))
         else:
             args = [self._login_shell]
@@ -1172,7 +1175,7 @@ class BashTool(FileChangeReceiptMixin, Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=invocation_env,
                 start_new_session=True,
             ))
 

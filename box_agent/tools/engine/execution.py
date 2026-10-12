@@ -72,7 +72,7 @@ async def invoke_tool_once(
         result = await tool.invoke(arguments, context=context)
     else:
         result = await tool.invoke(arguments)
-    if result.permission_request:
+    if result.permission_request or result._invocation_rejected:
         context.budget_charge.release_unexecuted()
     return result
 

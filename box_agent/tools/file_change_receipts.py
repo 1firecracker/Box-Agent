@@ -8,15 +8,120 @@ import json
 import uuid
 import os
 import stat
+import subprocess
+import threading
 from pathlib import Path
-from contextlib import asynccontextmanager
-from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from inspect import isawaitable
+from functools import wraps
 
-from .base import ToolInvocationContext, ToolResult
+from .base import ToolInvocationContext, ToolResult, ToolInvocationRejected, check_tool_cancellation
 from ..artifact_publication import SUFFIX
 from ..user_paths import state_path
+
+
+SCRIPT_FILE_CHANGE_LEASE_ENV = 'BOX_AGENT_SCRIPT_FILE_CHANGE_LEASES'
+_active_script_leases: ContextVar[tuple[Path, ...]] = ContextVar('active_script_leases', default=())
+_inherited_script_leases: ContextVar[tuple[Path, ...]] = ContextVar('inherited_script_leases', default=())
+_subprocess_scope_lock = threading.Lock()
+_subprocess_scope_users = 0
+_subprocess_scope_wrapper = None
+
+
+def _parent_script_leases() -> tuple[Path, ...]:
+    try:
+        inherited = json.loads(os.environ.get(SCRIPT_FILE_CHANGE_LEASE_ENV, '[]'))
+        if not isinstance(inherited, list) or not all(isinstance(path, str) for path in inherited):
+            inherited = []
+    except ValueError:
+        inherited = []
+    return tuple(dict.fromkeys((
+        *(Path(path) for path in inherited),
+        *_inherited_script_leases.get(),
+    )))
+
+
+def file_change_subprocess_env(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Pass enclosing script leases to children solely for deadlock rejection."""
+    paths = tuple(dict.fromkeys((*_parent_script_leases(), *_active_script_leases.get())))
+    if not paths:
+        return env
+    result = dict(os.environ if env is None else env)
+    result[SCRIPT_FILE_CHANGE_LEASE_ENV] = json.dumps([str(path) for path in paths])
+    return result
+
+
+@contextmanager
+def _script_subprocess_scope() -> Iterator[None]:
+    """Carry thread-local leases into subprocesses without changing os.environ."""
+    global _subprocess_scope_users, _subprocess_scope_wrapper
+    with _subprocess_scope_lock:
+        if not _subprocess_scope_users:
+            original = subprocess.Popen.__init__
+
+            @wraps(original)
+            def spawn(process, *args, **kwargs):
+                if _inherited_script_leases.get():
+                    # env is positional argument 11 in Popen's public signature.
+                    if len(args) > 10:
+                        args = list(args)
+                        args[10] = file_change_subprocess_env(args[10])
+                    else:
+                        kwargs['env'] = file_change_subprocess_env(kwargs.get('env'))
+                return original(process, *args, **kwargs)
+
+            _subprocess_scope_wrapper = spawn
+            subprocess.Popen.__init__ = spawn
+        _subprocess_scope_users += 1
+    try:
+        yield
+    finally:
+        with _subprocess_scope_lock:
+            _subprocess_scope_users -= 1
+            if not _subprocess_scope_users:
+                wrapper = _subprocess_scope_wrapper
+                if subprocess.Popen.__init__ is wrapper:
+                    subprocess.Popen.__init__ = wrapper.__wrapped__
+                _subprocess_scope_wrapper = None
+
+
+@contextmanager
+def script_file_change_scope(*, inherit_subprocesses: bool = False) -> Iterator[None]:
+    """Make a Python worker's nested SDK calls recognize its enclosing lease."""
+    token = _inherited_script_leases.set(tuple(dict.fromkeys((
+        *_parent_script_leases(), *_active_script_leases.get(),
+    ))))
+    try:
+        if inherit_subprocesses:
+            with _script_subprocess_scope():
+                yield
+        else:
+            yield
+    finally:
+        _inherited_script_leases.reset(token)
+
+
+def _check_nested_script(records: Path) -> None:
+    # A marker never grants authority or bypasses a lease. Ignore a different
+    # profile and expired leases, including markers retained by a persistent kernel.
+    for path in _parent_script_leases():
+        if path.parent != records or path.suffix != '.lease':
+            continue
+        try:
+            with path.open('rb') as stream:
+                _acquire_file_lock(stream)
+                _release_file_lock(stream)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise ToolInvocationRejected(
+                'NESTED_FILE_CHANGE_INVOCATION',
+                'A nested writing tool cannot wait for its enclosing Bash/Python lease. '
+                'Write directly in the script or invoke the tool after the script returns.',
+            ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +241,14 @@ async def _registry_lock(path: Path):
             stream.write(b'\0')
             stream.flush()
         while True:
+            check_tool_cancellation()
             try:
                 _acquire_file_lock(stream)
                 break
             except (BlockingIOError, PermissionError):
                 await asyncio.sleep(0.05)
         try:
+            check_tool_cancellation()
             yield
         finally:
             _release_file_lock(stream)
@@ -206,10 +313,15 @@ async def _workspace_execution_lock(
     """Acquire all affected roots atomically, without nested-lock deadlocks."""
     requested_roots = (root, *additional_roots)
     records = state_path('file-change-locks')
+    check_tool_cancellation()
+    _check_nested_script(records)
     records.mkdir(parents=True, exist_ok=True)
     leases = []
+    lease_token = None
     try:
         while not leases:
+            check_tool_cancellation()
+            _check_nested_script(records)
             async with _registry_lock(records / 'registry.lock'):
                 # A cooperating writer can retarget an alias while we wait.
                 # Resolve the original paths again on every acquisition attempt.
@@ -238,8 +350,13 @@ async def _workspace_execution_lock(
                         _acquire_file_lock(stream)
             if not leases:
                 await asyncio.sleep(0.05)
+        check_tool_cancellation()
+        if exclusive:
+            lease_token = _active_script_leases.set(tuple(path for path, _ in leases))
         yield
     finally:
+        if lease_token is not None:
+            _active_script_leases.reset(lease_token)
         for path, stream in leases:
             stream.close()  # The OS also releases the lease on process exit.
             try:
@@ -326,6 +443,8 @@ async def persist_file_change(workspace_dir: str, target: Path | None,
             if not target.is_relative_to(root):
                 raise ValueError('browser persistence target must stay inside the session workspace')
             return await capture_file_change(root, target, lambda: persist(target))
+    except ToolInvocationRejected as exc:
+        return exc.to_result()
     except (OSError, RuntimeError, ValueError) as exc:
         return ToolResult(success=False, error=f'BROWSER_PERSISTENCE_OUTPUT_PATH_INVALID: {exc}')
 
@@ -343,6 +462,7 @@ async def capture_file_change(root: Path, target: Path,
             before = await asyncio.to_thread(_file_hash, target)
     except (OSError, RuntimeError, ValueError):
         relative = None
+    check_tool_cancellation()
     result = persist()
     if isawaitable(result):
         result = await result
@@ -407,6 +527,11 @@ class FileChangeReceiptMixin:
                                   target: Path | None = None):
         arguments = dict(arguments)
         targets = arguments.pop('changed_files', None)
+
+        async def invoke():
+            check_tool_cancellation()
+            return await super(FileChangeReceiptMixin, self)._invoke_validated(arguments, context=context)
+
         direct_file_tool = target is not None
         if direct_file_tool:
             if isinstance(context, FileWriteInvocationContext) and context.validate_write_target:
@@ -419,19 +544,19 @@ class FileChangeReceiptMixin:
         if arguments.get('run_in_background'):
             if targets:
                 return ToolResult(success=False, error='FILE_CHANGES_REQUIRE_FOREGROUND: changed_files cannot track background commands')
-            return await super()._invoke_validated(arguments, context=context)
+            return await invoke()
         if not self.workspace_dir:
             if not targets:
-                return await super()._invoke_validated(arguments, context=context)
+                return await invoke()
             return ToolResult(success=False, error='FILE_CHANGES_REQUIRE_WORKSPACE: configure an explicit workspace for changed_files')
         root = Path(self.workspace_dir).expanduser().resolve()
         if _has_background_writer(root):
             # Background commands and shells surviving an Agent crash can
             # outlive their workspace lease. Never adopt their writes.
-            return await super()._invoke_validated(arguments, context=context)
+            return await invoke()
         if targets is None:
             before = await asyncio.to_thread(_workspace_hashes, root)
-            result = await super()._invoke_validated(arguments, context=context)
+            result = await invoke()
             if result.permission_request or before is None:
                 return result
             after = await asyncio.to_thread(_workspace_hashes, root)
@@ -444,7 +569,7 @@ class FileChangeReceiptMixin:
             ])
             return result.model_copy(update={'raw_output': raw})
         if not targets:
-            return await super()._invoke_validated(arguments, context=context)
+            return await invoke()
         resolved = {}
         try:
             for value in targets:
@@ -458,9 +583,9 @@ class FileChangeReceiptMixin:
         except (OSError, RuntimeError, ValueError) as exc:
             # Outside-workspace direct writes retain their established permissions.
             if direct_file_tool:
-                return await super()._invoke_validated(arguments, context=context)
+                return await invoke()
             return ToolResult(success=False, error=f'INVALID_CHANGED_FILES: {exc}')
-        result = await super()._invoke_validated(arguments, context=context)
+        result = await invoke()
         if result.permission_request:
             return result
         changes = []

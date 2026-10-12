@@ -6,6 +6,7 @@ import sys
 import textwrap
 import signal
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -24,6 +25,457 @@ from box_agent.acp import BoxACPAgent
 from box_agent.schema import StreamEvent, ToolCall, FunctionCall, LLMResponse
 
 pytestmark = pytest.mark.usefixtures('posix_shell')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['bash', 'write', 'staged', 'browser', 'delegated_write'])
+async def test_cooperative_cancel_stops_queued_write_before_holder_releases(tmp_path, monkeypatch, kind):
+    from box_agent.run_control import RunControl
+    from box_agent.tools import file_change_receipts as receipts
+    from box_agent.tools.base import Tool
+    from box_agent.tools.engine.execution import stream_tool_invocation
+    from box_agent.tools.engine.scheduler import ToolInvocationCompleted
+    from box_agent.tools.sub_agent_tool import _WriteScopedTool
+    from box_agent.tools.delegated_budget import DelegatedBudget, bind_budgets
+
+    target = tmp_path / 'same.txt'
+    target.write_text('before')
+    arguments = {'path': 'same.txt', 'content': 'AFTER_CANCEL'}
+    if kind == 'bash':
+        writer = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+        arguments = {'command': 'printf AFTER_CANCEL > same.txt', 'changed_files': ['same.txt']}
+    elif kind == 'staged':
+        writer = StagedFileWriteTool(workspace_dir=str(tmp_path))
+        begin = await writer.invoke({'action': 'begin', 'path': 'same.txt', 'expected_chunks': 1})
+        write_id = begin.raw_output['write_id']
+        appended = await writer.invoke({'action': 'append_text', 'write_id': write_id,
+                                       'chunk_index': 0, 'content': 'AFTER_CANCEL'})
+        assert begin.success and appended.success
+        arguments = {'action': 'commit', 'write_id': write_id}
+    elif kind == 'browser':
+        class BrowserPersistenceTool(Tool):
+            name = 'browser_save'
+            description = 'Persist a browser result'
+            parameters = {'type': 'object', 'properties': {}}
+
+            async def execute(self):
+                def persist(path):
+                    path.write_text('AFTER_CANCEL')
+                    return ToolResult(success=True)
+                return await persist_file_change(str(tmp_path), target, persist)
+
+        writer, arguments = BrowserPersistenceTool(), {}
+    elif kind == 'delegated_write':
+        writer = _WriteScopedTool(WriteTool(workspace_dir=str(tmp_path)), str(tmp_path), ('.',))
+    else:
+        writer = WriteTool(workspace_dir=str(tmp_path))
+
+    control, waiting = RunControl(), asyncio.Event()
+    original = receipts._overlapping_lease
+
+    def observe(root, records):
+        overlap = original(root, records)
+        if overlap:
+            waiting.set()
+        return overlap
+
+    monkeypatch.setattr(receipts, '_overlapping_lease', observe)
+    holder = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+    holding = asyncio.create_task(holder.invoke({
+        'command': 'while [ ! -f release ]; do sleep 0.01; done', 'timeout': 5,
+        'changed_files': [],
+    }))
+
+    async def collect():
+        return [record async for record in stream_tool_invocation(
+            writer, arguments, is_cancelled=lambda: control.cancelled,
+        )]
+
+    queued = None
+    try:
+        # The holder has already entered its invocation before this task queues.
+        while not list((receipts.state_path('file-change-locks')).glob('*.lease')):
+            await asyncio.sleep(0.005)
+        budget = DelegatedBudget(limit=1)
+        with bind_budgets((budget,)):
+            queued = asyncio.create_task(collect())
+        await asyncio.wait_for(waiting.wait(), 5)
+        assert target.read_text() == 'before' and not queued.done()
+        control.request_cancel()
+        completed, _ = await asyncio.wait((queued,), timeout=0.5)
+        stopped_while_holder_active = bool(completed)
+    finally:
+        (tmp_path / 'release').touch()
+        assert (await asyncio.wait_for(holding, 5)).success
+        if queued is not None:
+            records = await asyncio.wait_for(queued, 5)
+    result = next(record.result for record in records if isinstance(record, ToolInvocationCompleted))
+    assert not result.success
+    assert 'cancel' in result.error.lower()
+    assert not (result.raw_output or {}).get('file_changes')
+    assert target.read_text() == 'before'
+    assert stopped_while_holder_active
+    assert budget.used == 0
+    following = await asyncio.wait_for(WriteTool(workspace_dir=str(tmp_path)).invoke({
+        'path': 'same.txt', 'content': 'following',
+    }), 5)
+    assert following.success and target.read_text() == 'following'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('automatic', [False, True])
+async def test_cooperative_cancel_during_before_hash_prevents_script_write(tmp_path, monkeypatch, automatic):
+    from box_agent.run_control import RunControl
+    from box_agent.tools import file_change_receipts as receipts
+    from box_agent.tools.engine.execution import stream_tool_invocation
+    from box_agent.tools.engine.scheduler import ToolInvocationCompleted
+
+    target = tmp_path / 'same.txt'
+    target.write_text('before')
+    control, started, release = RunControl(), threading.Event(), threading.Event()
+    name = '_workspace_hashes' if automatic else '_file_hash'
+    original = getattr(receipts, name)
+
+    def pause_hash(*args):
+        started.set()
+        assert release.wait(5)
+        return original(*args)
+
+    monkeypatch.setattr(receipts, name, pause_hash)
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+    arguments = {'command': 'printf AFTER_CANCEL > same.txt'}
+    if not automatic:
+        arguments['changed_files'] = ['same.txt']
+
+    async def collect():
+        return [record async for record in stream_tool_invocation(
+            tool, arguments, is_cancelled=lambda: control.cancelled,
+        )]
+
+    queued = asyncio.create_task(collect())
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        control.request_cancel()
+    finally:
+        release.set()
+    records = await asyncio.wait_for(queued, 5)
+    result = next(record.result for record in records if isinstance(record, ToolInvocationCompleted))
+    assert not result.success
+    assert target.read_text() == 'before'
+    assert not (result.raw_output or {}).get('file_changes')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['registry_wait', 'lease_acquired'])
+async def test_cooperative_cancel_at_acquisition_boundary_releases_all_locks(tmp_path, monkeypatch, boundary):
+    from box_agent.run_control import RunControl
+    from box_agent.tools import file_change_receipts as receipts
+    from box_agent.tools.engine.execution import stream_tool_invocation
+    from box_agent.tools.engine.scheduler import ToolInvocationCompleted
+
+    control, waiting = RunControl(), asyncio.Event()
+    records = receipts.state_path('file-change-locks')
+    records.mkdir(parents=True)
+    original = receipts._acquire_file_lock
+
+    def observe(stream):
+        if boundary == 'registry_wait' and Path(stream.name).name == 'registry.lock':
+            waiting.set()
+        original(stream)
+        if boundary == 'lease_acquired' and Path(stream.name).suffix == '.lease':
+            control.request_cancel()
+
+    monkeypatch.setattr(receipts, '_acquire_file_lock', observe)
+    writer = WriteTool(workspace_dir=str(tmp_path))
+
+    async def collect():
+        return [record async for record in stream_tool_invocation(
+            writer, {'path': 'same.txt', 'content': 'AFTER_CANCEL'},
+            is_cancelled=lambda: control.cancelled,
+        )]
+
+    if boundary == 'registry_wait':
+        async with receipts._registry_lock(records / 'registry.lock'):
+            waiting.clear()
+            queued = asyncio.create_task(collect())
+            await asyncio.wait_for(waiting.wait(), 5)
+            control.request_cancel()
+            completed, _ = await asyncio.wait((queued,), timeout=0.5)
+            stopped_before_release = bool(completed)
+        output = await asyncio.wait_for(queued, 5)
+        assert stopped_before_release
+    else:
+        output = await asyncio.wait_for(collect(), 5)
+    result = next(record.result for record in output if isinstance(record, ToolInvocationCompleted))
+    assert not result.success and 'cancel' in result.error.lower()
+    assert not (tmp_path / 'same.txt').exists()
+    assert not list(records.glob('*.lease'))
+    monkeypatch.setattr(receipts, '_acquire_file_lock', original)
+    assert (await asyncio.wait_for(writer.invoke({'path': 'same.txt', 'content': 'following'}), 5)).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('screenshot', [False, True])
+async def test_agent_cancel_stops_queued_browser_persistence(tmp_path, monkeypatch, screenshot):
+    import base64
+    from box_agent.core import run_agent_loop
+    from box_agent.events import ToolCallResult
+    from box_agent.run_control import RunControl
+    from box_agent.schema import Message
+    from box_agent.tools import file_change_receipts as receipts
+    from box_agent.tools.base import Tool
+
+    name = 'managed_browser_take_screenshot' if screenshot else 'managed_browser_snapshot'
+    filename = 'capture.png' if screenshot else 'capture.md'
+    target = tmp_path / filename
+    target.write_bytes(b'before')
+
+    class BrowserTool(Tool):
+        description = 'Capture the browser'
+        parameters = {'type': 'object', 'properties': {'filename': {'type': 'string'}}}
+
+        @property
+        def name(self):
+            return name
+
+        async def execute(self, filename=''):
+            if screenshot:
+                return ToolResult(success=True, raw_output={'mcp_inline_images': [
+                    {'data': base64.b64encode(b'new-image').decode()},
+                ]})
+            return ToolResult(success=True, content='new-snapshot')
+
+    tool = BrowserTool()
+
+    class Model:
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            yield StreamEvent(type='finish', finish_reason='tool', tool_calls=[
+                ToolCall(id='capture', type='function', function=FunctionCall(
+                    name=name, arguments={'filename': filename},
+                )),
+            ])
+
+    control, waiting = RunControl(), asyncio.Event()
+    original = receipts._overlapping_lease
+
+    def observe(root, records):
+        overlap = original(root, records)
+        if overlap:
+            waiting.set()
+        return overlap
+
+    monkeypatch.setattr(receipts, '_overlapping_lease', observe)
+
+    async def collect():
+        return [event async for event in run_agent_loop(
+            llm=Model(), messages=[Message(role='user', content='Capture the browser')],
+            tools={name: tool}, max_steps=2, workspace_dir=str(tmp_path),
+            is_cancelled=lambda: control.cancelled,
+        )]
+
+    async with receipts._workspace_execution_lock(tmp_path):
+        queued = asyncio.create_task(collect())
+        await asyncio.wait_for(waiting.wait(), 5)
+        control.request_cancel()
+        completed, _ = await asyncio.wait((queued,), timeout=0.5)
+        stopped_before_release = bool(completed)
+    events = await asyncio.wait_for(queued, 5)
+    result = next(event for event in events if isinstance(event, ToolCallResult))
+    assert not result.success
+    assert not (result.raw_output or {}).get('file_changes')
+    assert target.read_bytes() == b'before'
+    assert stopped_before_release
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('disjoint', [False, True])
+async def test_nested_sdk_write_in_bash_fails_without_waiting_for_outer_timeout(tmp_path, monkeypatch, disjoint):
+    monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'profile'))
+    inner = tmp_path / 'inner' if disjoint else tmp_path
+    inner.mkdir(exist_ok=True)
+    repo = str(Path(__file__).resolve().parent.parent)
+    source = textwrap.dedent(f'''
+        import asyncio, sys
+        sys.path.insert(0, {repo!r})
+        from box_agent.tools.file_tools import WriteTool
+        print('nested-ready', flush=True)
+        result = asyncio.run(WriteTool(workspace_dir={str(inner)!r}).invoke(
+            {{'path': 'nested.txt', 'content': 'nested'}}))
+        print(result.error, flush=True)
+        assert not result.success
+    ''')
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+    result = await asyncio.wait_for(tool.invoke({
+        'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(source),
+        'timeout': 3, 'changed_files': [],
+    }), 10)
+    assert 'nested-ready' in result.content
+    assert result.success, result.error
+    assert 'NESTED_FILE_CHANGE_INVOCATION' in result.content
+    assert not (inner / 'nested.txt').exists()
+    following = await asyncio.wait_for(WriteTool(workspace_dir=str(inner)).invoke({
+        'path': 'nested.txt', 'content': 'following',
+    }), 5)
+    assert following.success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kernel', [False, True])
+async def test_nested_sdk_write_in_python_fails_without_releasing_outer_lease(tmp_path, monkeypatch, kernel):
+    from box_agent.tools.jupyter_tool import JupyterKernelSession
+
+    monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'profile'))
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    env = SimpleNamespace(ensure_ready=AsyncMock())
+    monkeypatch.setattr(tool, '_get_sandbox_env', lambda: env)
+    repo = str(Path(__file__).resolve().parent.parent)
+    invocation = (f"WriteTool(workspace_dir={str(tmp_path)!r}).invoke("
+                  "{'path': 'nested.txt', 'content': 'nested'})")
+    invocation = f'asyncio.wait_for({invocation}, 1)'
+    invocation = f'await {invocation}' if kernel else f'asyncio.run({invocation})'
+    code = textwrap.dedent(f'''
+        import asyncio, sys
+        sys.path.insert(0, {repo!r})
+        from box_agent.tools.file_tools import WriteTool
+        result = {invocation}
+        assert not result.success, result
+        assert 'NESTED_FILE_CHANGE_INVOCATION' in result.error, result.error
+    ''')
+    if kernel:
+        from jupyter_client import KernelManager
+
+        manager = KernelManager()
+        await manager._async_start_kernel(cwd=str(tmp_path))
+        client = manager.client()
+        client.start_channels()
+        await asyncio.to_thread(client.wait_for_ready, timeout=15)
+        session = JupyterKernelSession('s1', tmp_path, env)
+        session._km, session._kc = manager, client
+    else:
+        # Execute the cell's real nested SDK call in the tool's executor thread;
+        # kernel transport is the only substitute, and no fake write result is used.
+        def execute(code, timeout):
+            exec(code, {})
+            return '', [], None
+
+        session = SimpleNamespace(workspace=tmp_path, is_alive=lambda: True,
+                                  execute=execute, stop=AsyncMock())
+    monkeypatch.setattr(tool, '_sessions', {'s1': session})
+    try:
+        result = await asyncio.wait_for(tool.invoke({
+            'code': code, 'session_id': 's1', 'timeout': 2, 'changed_files': [],
+        }), 5)
+        assert result.success, result.error
+        assert not (tmp_path / 'nested.txt').exists()
+        if kernel:
+            # Reuse the real persistent kernel: the next cell must see its new
+            # enclosing lease rather than retaining the previous, expired one.
+            repeated = await asyncio.wait_for(tool.invoke({
+                'code': code, 'session_id': 's1', 'timeout': 2, 'changed_files': [],
+            }), 5)
+            assert repeated.success, repeated.error
+            assert not (tmp_path / 'nested.txt').exists()
+    finally:
+        await tool._discard_session('s1')
+    following = await asyncio.wait_for(WriteTool(workspace_dir=str(tmp_path)).invoke({
+        'path': 'nested.txt', 'content': 'following',
+    }), 5)
+    assert following.success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('expired', [False, True])
+async def test_expired_script_marker_does_not_reject_later_write(tmp_path, monkeypatch, expired):
+    import json
+    from box_agent.tools import file_change_receipts as receipts
+
+    monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'profile'))
+    records = receipts.state_path('file-change-locks')
+    async with receipts._workspace_execution_lock(tmp_path, exclusive=True):
+        marker = receipts.file_change_subprocess_env(None)[receipts.SCRIPT_FILE_CHANGE_LEASE_ENV]
+    if expired:
+        # Simulate a crashed owner's unlocked record retained until reclamation.
+        Path(json.loads(marker)[0]).write_bytes(b'\0null')
+    monkeypatch.setenv(receipts.SCRIPT_FILE_CHANGE_LEASE_ENV, marker)
+    result = await asyncio.wait_for(WriteTool(workspace_dir=str(tmp_path)).invoke({
+        'path': 'following.txt', 'content': 'following',
+    }), 5)
+    assert result.success and (tmp_path / 'following.txt').read_text() == 'following'
+    assert not list(records.glob('*.lease'))
+
+
+@pytest.mark.asyncio
+async def test_inprocess_python_child_inherits_lease_without_changing_host_environment(tmp_path, monkeypatch):
+    import subprocess
+    import threading
+    from box_agent.tools import file_change_receipts as receipts
+
+    monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'profile'))
+    monkeypatch.delenv(receipts.SCRIPT_FILE_CHANGE_LEASE_ENV, raising=False)
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    monkeypatch.setattr(tool, '_get_sandbox_env', lambda: SimpleNamespace(ensure_ready=AsyncMock()))
+    repo = str(Path(__file__).resolve().parent.parent)
+    child = textwrap.dedent(f'''
+        import asyncio, sys
+        sys.path.insert(0, {repo!r})
+        from box_agent.tools.file_tools import WriteTool
+        result = asyncio.run(asyncio.wait_for(WriteTool(workspace_dir={str(tmp_path)!r}).invoke(
+            {{'path': 'nested.txt', 'content': 'nested'}}), 1))
+        assert not result.success, result
+        assert 'NESTED_FILE_CHANGE_INVOCATION' in result.error, result.error
+    ''')
+    ready, release = threading.Event(), threading.Event()
+
+    def execute(code, timeout):
+        ready.set()
+        assert release.wait(5)
+        exec(code, {})
+        return '', [], None
+
+    session = SimpleNamespace(workspace=tmp_path, is_alive=lambda: True,
+                              execute=execute, stop=AsyncMock())
+    monkeypatch.setattr(tool, '_sessions', {'s1': session})
+    # Both inherited and caller-supplied environments must retain the marker.
+    code = f'''import os, subprocess
+for env in (None, dict(os.environ)):
+    subprocess.run([{sys.executable!r}, '-c', {child!r}], env=env, check=True, timeout=3)
+'''
+    original = subprocess.Popen.__init__
+    task = asyncio.create_task(tool.invoke({
+        'code': code, 'session_id': 's1', 'timeout': 10, 'changed_files': [],
+    }))
+    try:
+        assert await asyncio.to_thread(ready.wait, 5)
+        assert receipts.SCRIPT_FILE_CHANGE_LEASE_ENV not in os.environ
+        host_child = await asyncio.create_subprocess_exec(
+            sys.executable, '-c',
+            f'import os; assert {receipts.SCRIPT_FILE_CHANGE_LEASE_ENV!r} not in os.environ',
+        )
+        assert await host_child.wait() == 0
+        release.set()
+        result = await asyncio.wait_for(task, 10)
+        assert result.success, result.error
+        assert not (tmp_path / 'nested.txt').exists()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert subprocess.Popen.__init__ is original
+    assert receipts.SCRIPT_FILE_CHANGE_LEASE_ENV not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_enclosing_script_marker_from_another_profile_does_not_reject_write(tmp_path, monkeypatch):
+    from box_agent.tools import file_change_receipts as receipts
+
+    monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'first-profile'))
+    async with receipts._workspace_execution_lock(tmp_path, exclusive=True):
+        marker = receipts.file_change_subprocess_env(None)[receipts.SCRIPT_FILE_CHANGE_LEASE_ENV]
+        monkeypatch.setenv(receipts.SCRIPT_FILE_CHANGE_LEASE_ENV, marker)
+        monkeypatch.setenv('BOX_AGENT_HOME', str(tmp_path / 'second-profile'))
+        result = await asyncio.wait_for(WriteTool(workspace_dir=str(tmp_path)).invoke({
+            'path': 'following.txt', 'content': 'following',
+        }), 5)
+    assert result.success and (tmp_path / 'following.txt').read_text() == 'following'
 
 
 def digest(data):

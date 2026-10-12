@@ -67,6 +67,28 @@ creation, so a shell surviving an Agent crash also suppresses attribution after
 the Agent's workspace lease is reclaimed. Python cancellation stops and joins the execution worker before
 releasing the workspace lock.
 
+Cooperative run cancellation is carried through the shared invocation scope,
+including delegated wrappers and browser persistence. Registry and workspace
+lease waits check cancellation on every retry and after acquisition. A final
+checkpoint after the before-hash scan prevents a cancelled queued invocation
+from starting its write. These rejections return `TOOL_EXECUTION_CANCELLED`, do
+not emit change receipts, release acquired leases, and release unexecuted
+delegated budget reservations. Cancellation does not undo a write that already
+started; Python workers still stop and join before releasing their lease.
+
+Nested SDK writing tools with a propagated parent lease are rejected with
+`NESTED_FILE_CHANGE_INVOCATION` while the outer foreground Bash/Python script's
+lease is active in the same profile, even for a different workspace. Scripts
+should write directly or let their caller invoke the writing tool after the
+script returns. Shell subprocesses inherit internal lease markers; Python
+executor threads carry the invocation context, and persistent Jupyter kernels
+receive and restore the current marker for each cell. In-process cells pass
+markers to `subprocess.Popen`/`subprocess.run` children through a scoped,
+context-aware wrapper, without changing the shared host environment or injecting
+markers into unrelated host threads. Markers only reject deadlocking nested
+writes; they never authorize writes or bypass lease/permission checks. Expired
+markers and markers from another profile do not reject otherwise valid calls.
+
 ACP tool starts add `_meta.tool_name`, `task_id` and `turn_id`. Tool results add:
 
 ```json
@@ -103,6 +125,11 @@ process-level isolation or tracing for absolute attribution. Same-path interleav
 versions and old records without reliable receipts remain unconfirmed rather than
 being assigned to a task. Cancellation can wait for an in-process Python worker
 to stop; Python threads cannot be forcefully terminated safely.
+In-process cells launching children through `os.system`/`os.posix_spawn`, or
+creating threads without explicitly propagating the invocation ContextVars, do
+not propagate parent leases. Nested SDK writes across those boundaries can still
+wait for the enclosing lease; use direct script writes or invoke the tool after
+the script returns.
 
 Source tests do not install this protocol into the desktop's bundled runtime. Both
 Agent and desktop need updated builds before a live-session verification can prove
