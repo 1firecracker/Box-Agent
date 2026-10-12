@@ -42,7 +42,6 @@ import yaml
 from box_agent import LLMClient, __version__
 from box_agent.agent_session import AgentSession
 from box_agent.agent_service import AgentService
-from box_agent.turn_language import with_deliverable_language_hint
 from box_agent.api import RunRequest
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.cli_renderer import render_agent_events
@@ -2350,7 +2349,7 @@ async def run_agent(
                         ):
                             final_content = await _run_session_turn(
                                 agent_session,
-                                user_message=with_deliverable_language_hint(task),
+                                user_message=task,
                                 session_id=logical_session_id,
                                 turn_id=traced_turn.turn_id,
                                 force_plan_start=agent_session.force_plan_start,
@@ -2738,7 +2737,7 @@ async def run_agent(
                             agent_task = asyncio.create_task(
                                 _run_session_turn(
                                     agent_session,
-                                    user_message=with_deliverable_language_hint(user_input),
+                                    user_message=user_input,
                                     session_id=logical_session_id,
                                     turn_id=traced_turn.turn_id,
                                     force_plan_start=agent_session.force_plan_start,

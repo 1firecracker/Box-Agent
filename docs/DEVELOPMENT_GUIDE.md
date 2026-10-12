@@ -572,3 +572,10 @@ logger.debug(f"Tool call: {tool_call.name}")
 logger.debug(f"Tool arguments: {tool_call.arguments}")
 logger.debug(f"Tool result: {result.content[:200]}")
 ```
+
+Deliverable files follow the current request's language unless the user explicitly
+chooses another language; reference material does not override that choice.
+Conversational replies and progress follow the host UI language (ACP `ui_language`).
+CLI, Python SDK and ACP share the turn-hint generator. Only sufficiently clear English
+or Japanese requests trigger it; uncertain languages are not forced to English.
+Utility sessions and automatic continuations do not receive these hints.

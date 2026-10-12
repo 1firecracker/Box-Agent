@@ -571,3 +571,8 @@ logger.debug(f"工具调用: {tool_call.name}")
 logger.debug(f"工具参数: {tool_call.arguments}")
 logger.debug(f"工具结果: {result.content[:200]}")
 ```
+
+交付文件默认跟随当前用户提问的语种，资料语种不改变交付语种，用户明确指定的
+输出语种优先。对话回复和进度说明跟随宿主的界面语种（如 ACP `ui_language`）。
+CLI、Python SDK 和 ACP 共用回合提醒生成器；只有有足够英文线索或日文假名的
+原始请求触发，无法可靠判断的语言不强制成英文，utility 会话和自动续跑不添加提醒。

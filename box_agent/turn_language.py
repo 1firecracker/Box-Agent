@@ -19,6 +19,8 @@ import re
 # deliverable and should not gain a hint.
 _MIN_LETTERS = 30
 _MAX_CJK_SHARE = 0.1
+_ENGLISH_CUES = frozenset({"a", "the", "this", "please", "write", "create", "build", "save",
+                           "based", "on", "and", "as", "for", "from", "with", "into", "summarize"})
 # Spans that say nothing about the user's language: code, URLs, paths, tags,
 # and slash commands such as "/pptx".
 _NOISE = re.compile(
@@ -47,7 +49,10 @@ def request_language(text: str) -> str | None:
     latin = sum(1 for char in content if char.isascii() and char.isalpha())
     if kana >= 5 and kana >= han * 0.3:
         return "Japanese"
-    if latin >= _MIN_LETTERS and (han + kana) / (latin + han + kana) < _MAX_CJK_SHARE:
+    words = set(re.findall(r"\b[a-z]+\b", content.lower()))
+    if (latin >= _MIN_LETTERS and len(words & _ENGLISH_CUES) >= 3
+            and not any(char.isalpha() and not char.isascii() for char in content)
+            and (han + kana) / (latin + han + kana) < _MAX_CJK_SHARE):
         return "English"
     return None
 

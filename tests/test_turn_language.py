@@ -60,3 +60,14 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
     assert ("[Deliverable language: English." in user_message) is hinted
     if hinted:
         assert user_message.index(text) < user_message.index("[Deliverable language")
+
+
+@pytest.mark.parametrize('text', [
+    'Escribe una breve descripción del producto basada en product.md y guárdala como blurb.md.',
+    'Bitte schreibe eine kurze Produktbeschreibung und speichere sie in blurb.md.',
+    'Rédige une courte description du produit dans blurb.md pour notre équipe.',
+    'Escreva uma descrição breve do produto e salve em blurb.md.',
+])
+def test_other_latin_script_languages_are_not_forced_to_english(text):
+    assert request_language(text) is None
+    assert with_deliverable_language_hint(text) == text
