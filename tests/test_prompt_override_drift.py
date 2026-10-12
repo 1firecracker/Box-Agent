@@ -94,7 +94,7 @@ def test_configured_template_path_is_checked(override_home, capsys, filename, at
     target.write_text('stale template', encoding='utf-8')
     configured = str(target) if absolute else 'custom.md'
     config = Config(llm=LLMConfig(api_key="test"), tools=ToolsConfig(), agent=AgentConfig(**{attr: configured}))
-    assert Config.find_config_file(configured, prompt_template=filename) == target
+    assert Config.find_prompt_file(configured, filename) == target
     assert filename in capsys.readouterr().err
     status = _doctor_prompt_status(config)
     assert status['status'] == 'warning'

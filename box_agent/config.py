@@ -761,10 +761,17 @@ class Config(BaseModel):
         return Path(__file__).parent
 
     @classmethod
-    def find_config_file(cls, filename: str, *, prompt_template: str | None = None) -> Path | None:
+    def find_config_file(cls, filename: str) -> Path | None:
         path = cls._find_config_file(filename)
-        template = prompt_template or filename
-        if path is not None and template in PROMPT_TEMPLATE_FILES:
+        if path is not None and filename in PROMPT_TEMPLATE_FILES:
+            _warn_prompt_override_drift(path, filename)
+        return path
+
+    @classmethod
+    def find_prompt_file(cls, filename: str, template: str) -> Path | None:
+        """Resolve configured prompt paths while preserving the generic lookup API."""
+        path = cls.find_config_file(filename)
+        if path is not None and filename != template:
             _warn_prompt_override_drift(path, template)
         return path
 
