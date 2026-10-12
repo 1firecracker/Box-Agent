@@ -18,7 +18,6 @@ import re
 # About six English words: short continuations ("continue after restart") carry no
 # deliverable and should not gain a hint.
 _MIN_LETTERS = 30
-_MAX_CJK_SHARE = 0.1
 # Exclude ambiguous words such as a/on/as, which are also common in French.
 _ENGLISH_CUES = frozenset({"the", "this", "please", "write", "create", "build", "save", "can", "you", "check", "whether", "should", "it",
                            "based", "and", "for", "from", "with", "into", "summarize"})
@@ -27,7 +26,6 @@ _ENGLISH_CUES = frozenset({"the", "this", "please", "write", "create", "build", 
 _NOISE = re.compile(
     r"```.*?```|`[^`]*`|https?://\S+|(?<![\w.-])(?:[\w.-]+/)+[\w.-]+|<[^<>]+>|(?<!\S)/[\w-]+", re.DOTALL,
 )
-_QUOTE_ENDS = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
 
 _HINTS = {
     "English": (
@@ -35,43 +33,17 @@ _HINTS = {
         "files you create (documents, copy, reports, slides) in English too, even when the "
         "reference material is in another language, unless the user asks for a specific language.]"
     ),
-    "Japanese": (
-        "[成果物の言語：日本語。ユーザーは日本語で依頼しています。参考資料が別の言語でも、"
-        "作成するファイル（文書・コピー・レポート・スライド）は日本語で書いてください。"
-        "ユーザーが別の言語を指定した場合はそれに従ってください。]"
-    ),
 }
 
 
-def _without_quoted_text(text: str) -> str:
-    """Skip reference quotations in one pass, including an unclosed final quote."""
-    closing = None
-    kept = []
-    for char in text:
-        if closing is not None:
-            if char == closing:
-                closing = None
-        elif char in _QUOTE_ENDS:
-            closing = _QUOTE_ENDS[char]
-        else:
-            kept.append(char)
-    return ''.join(kept)
-
-
 def request_language(text: str) -> str | None:
-    """Return "English" or "Japanese" for a clearly non-Chinese request, else None."""
+    """Return "English" for a sufficiently clear English request, else None."""
     content = _NOISE.sub(" ", text)
-    unquoted = _without_quoted_text(content)
-    kana = sum(1 for char in unquoted if "぀" <= char <= "ヿ")
-    han = sum(1 for char in unquoted if "一" <= char <= "鿿")
     latin = sum(1 for char in content if char.isascii() and char.isalpha())
     words = set(re.findall(r"\b[a-z]+\b", content.lower()))
     clear_english = latin >= _MIN_LETTERS and len(words & _ENGLISH_CUES) >= 3
-    if kana >= 5 and kana >= han and kana + han >= latin and not clear_english:
-        return "Japanese"
     if (clear_english
-            and not any(char.isalpha() and not char.isascii() for char in content)
-            and (han + kana) / (latin + han + kana) < _MAX_CJK_SHARE):
+            and not any(char.isalpha() and not char.isascii() for char in content)):
         return "English"
     return None
 

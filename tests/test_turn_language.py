@@ -17,7 +17,7 @@ from box_agent.turn_language import deliverable_language_hint, request_language,
     ("/pptx Build a ten-slide deck from notes.md for the quarterly board review.", "English"),
     ("OK继续", None),
     ("`src/box_agent/very/long/path/name.py` ```print('hello world from code')``` 修一下", None),
-    ("product.md をもとに短い紹介文を書いて blurb.md に保存してください。", "Japanese"),
+    ("product.md をもとに短い紹介文を書いて blurb.md に保存してください。", None),
 ])
 def test_request_language(text, expected):
     assert request_language(text) == expected
@@ -93,7 +93,7 @@ def test_chinese_request_referencing_japanese_does_not_gain_a_japanese_hint(phra
     assert with_deliverable_language_hint(text) == text
 
 
-@pytest.mark.parametrize('opening,closing', [('"', '"'), ("'", "'"), ('“', '”'), ('‘', '’'), ('「', '」'), ('『', '』')])
+@pytest.mark.parametrize('opening,closing', [('', ''), ('"', '"'), ("'", "'"), ('“', '”'), ('‘', '’'), ('「', '」'), ('『', '』')])
 def test_chinese_request_quoting_japanese_paragraph_is_not_forced_to_japanese(opening, closing):
     paragraph = ('こちらの商品は、みなさまにもっと便利にお使いいただけるように、'
                  'さまざまな新しい機能をそなえています。ご利用になるまえに、'
@@ -103,9 +103,10 @@ def test_chinese_request_quoting_japanese_paragraph_is_not_forced_to_japanese(op
     assert with_deliverable_language_hint(text) == text
 
 
-def test_japanese_request_with_quoted_title_is_still_recognized():
+def test_japanese_request_uses_the_system_language_contract_without_extra_inference():
     text = 'product.md をもとに「新しい商品」の短い紹介文を書いて blurb.md に保存してください。'
-    assert request_language(text) == 'Japanese'
+    assert request_language(text) is None
+    assert with_deliverable_language_hint(text) == text
 
 
 @pytest.mark.parametrize('character', ['f', '<', '“'])
