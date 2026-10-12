@@ -22,8 +22,24 @@ _PATTERNS = (
     re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{20,})"),
-    re.compile(r"(?i)(?:password|passwd|pwd|密码|口令)\s*(?:[:=：]|是|为)\s*([^\s，。,;；'\"`]{6,})"),
+
 )
+
+
+_PASSWORD = re.compile(
+    r'''(?i)(?<![A-Za-z0-9_])['"]?(?:password|passwd|pwd|密码|口令)['"]?\s*(?:[:=：]|是|为)\s*(?:"([^"\n]{6,})"|'([^'\n]{6,})'|([^\s，。,;；'"`]{6,}))'''
+)
+_ENV_REFERENCE = re.compile(r"(?:\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*|%[A-Za-z_]\w*%|process\.env\.[A-Za-z_]\w*|os\.environ.*)")
+
+
+def _password_values(text: str) -> list[tuple[int, str]]:
+    values = []
+    for match in _PASSWORD.finditer(text):
+        index = next(i for i, value in enumerate(match.groups(), 1) if value is not None)
+        value = match.group(index)
+        if not _ENV_REFERENCE.fullmatch(value):
+            values.append((match.start(index), value))
+    return values
 
 
 def detect_credentials(text: str) -> list[str]:
@@ -34,6 +50,7 @@ def detect_credentials(text: str) -> list[str]:
             value = match.group(1) if match.groups() else match.group(0)
             start = match.start(1) if match.groups() else match.start()
             found.append((start, value))
+    found.extend(_password_values(text))
     values: list[str] = []
     for _, value in sorted(found):
         if value not in values and not any(value in other or other in value for other in values):
@@ -41,9 +58,9 @@ def detect_credentials(text: str) -> list[str]:
     return values
 
 
-def mask_credential(value: str) -> str:
+def mask_credential(value: str, *, password: bool = False) -> str:
     """Keep enough to identify a long prefixed key; reveal nothing of short secrets."""
-    if len(value) >= 24:
+    if not password and len(value) >= 24 and re.match(r"(?:sk-|gh[pousr]_|github_pat_|xox[abprs]-)", value):
         return f"{value[:8]}…{value[-4:]}"
     return "****"
 
@@ -52,7 +69,8 @@ def credential_notice(text: str) -> str | None:
     values = detect_credentials(text)
     if not values:
         return None
-    masked = "、".join(f"`{mask_credential(value)}`" for value in values)
+    passwords = {value for _, value in _password_values(text)}
+    masked = "、".join(f"`{mask_credential(value, password=value in passwords)}`" for value in values)
     return (
         f"[敏感信息：本条消息含疑似凭据（{masked}）。回复、写入的文件和执行的命令中都不要出现其完整值："
         "回复里需要指代时只用上面的脱敏形式；代码和配置改为从环境变量或配置项读取（如 `${DB_PASSWORD}`）；"

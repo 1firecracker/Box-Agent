@@ -73,3 +73,29 @@ async def test_acp_prompt_places_credential_notice_after_the_request(tmp_path):
     assert user_message.startswith(text)
     assert "[敏感信息：本条消息含疑似凭据（`sk-live-…5a36`）" in user_message
     assert user_message.endswith(_EMPTY_CONNECTOR_CONTEXT)
+
+
+@pytest.mark.parametrize('text', [
+    'password: "fixture-password-long"',
+    "password: 'fixture-password-long'",
+    '"password": "fixture-password-long"',
+    'password: "fixture password with spaces"',
+])
+def test_quoted_passwords_receive_a_fully_masked_notice(text):
+    [value] = detect_credentials(text)
+    notice = credential_notice(text)
+    assert value not in notice
+    assert '`****`' in notice
+
+
+def test_long_password_does_not_disclose_prefix_or_suffix():
+    password = 'ThisIsAReallyLongDatabasePassword1234'
+    notice = credential_notice('password: ' + password)
+    assert password[:8] not in notice and password[-4:] not in notice
+    assert '`****`' in notice
+
+
+@pytest.mark.parametrize('reference', ['${DB_PASSWORD}', '$DB_PASSWORD', '%DB_PASSWORD%', 'process.env.DB_PASSWORD', 'os.environ["DB_PASSWORD"]'])
+def test_environment_references_are_not_credentials(reference):
+    assert detect_credentials('password: ' + reference) == []
+    assert credential_notice('password: ' + reference) is None

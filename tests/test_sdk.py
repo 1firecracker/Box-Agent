@@ -288,3 +288,14 @@ async def test_sdk_synthetic_continuation_preserves_message_without_language_hin
         'continuation-run', 'hint-session', text, metadata={'synthetic_continuation': True},
     ))
     assert session.agent.messages == [text]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('utility', [False, True])
+async def test_sdk_credential_notice_respects_utility_opt_out(utility):
+    session = _Session()
+    session.utility_session = utility
+    text = 'password: fixture-password-not-real'
+    await AgentClient(session).run(RunRequest('credential-run', 'session', text))
+    assert ('[敏感信息' in session.agent.messages[0]) is (not utility)
+    assert session.agent.messages[0].startswith(text)
