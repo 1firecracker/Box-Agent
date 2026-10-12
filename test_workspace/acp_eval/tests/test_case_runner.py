@@ -1145,3 +1145,21 @@ def test_rooted_workspace_setup_cannot_escape_the_pack(setup) -> None:
 
     with pytest.raises(ValueError, match="workspace_setup"):
         WorkspaceSetup.from_record({"workspace_setup": setup})
+
+
+@pytest.mark.parametrize('path', ['.git/hooks/pre-commit', '.GiT/config', '.git./config', 'pkg/.git/config'])
+def test_rooted_setup_rejects_git_control_paths_before_copy(tmp_path, path):
+    from acp_eval.models import WorkspaceSetup
+    with pytest.raises(ValueError, match='Git control'):
+        WorkspaceSetup.from_record({'workspace_setup': {'root': 'fixture', 'files': [path], 'git_commit': True}})
+
+
+def test_setup_rejects_unsafe_dirty_phase_before_git_runs(tmp_path):
+    from acp_eval.models import WorkspaceSetup
+    from acp_eval.case_runner import _prepare_workspace
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    setup = WorkspaceSetup(root='fixture', files=('safe.txt',), dirty_files=('.git/config',), git_commit=True)
+    with pytest.raises(ValueError, match='Git control'):
+        _prepare_workspace(tmp_path, workspace, setup)
+    assert list(workspace.iterdir()) == []

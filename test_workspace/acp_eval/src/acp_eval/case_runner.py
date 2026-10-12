@@ -132,13 +132,17 @@ def _copy_inputs(dataset_root: Path, workspace: Path, paths: Sequence[str]) -> l
 
 
 _GIT_IDENTITY = ("-c", "user.name=acp-eval", "-c", "user.email=acp-eval@example.invalid",
-                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main")
+                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+                 "-c", f"core.hooksPath={os.devnull}")
 
 
 def _prepare_workspace(dataset_root: Path, workspace: Path, setup: WorkspaceSetup) -> None:
     """Stage project files (not attachments), optionally as a git baseline plus dirty work."""
     if not setup.files and not setup.dirty_files:
         return
+    # Validate both phases before any copy or Git invocation.
+    for path in (*setup.files, *setup.dirty_files):
+        setup.destination(path)
     _stage(dataset_root, workspace, setup, setup.files)
     if setup.git_commit:
         git = shutil.which("git")

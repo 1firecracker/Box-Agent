@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Mapping
 
 from acp_eval import SCHEMA_VERSION
@@ -26,7 +26,11 @@ class WorkspaceSetup:
 
     def destination(self, path: str) -> str:
         """Workspace-relative destination of a staged path."""
-        return path if self.root is not None else Path(path).name
+        destination = path if self.root is not None else Path(path).name
+        parts = PureWindowsPath(destination).parts
+        if any(part.lower().rstrip(' .') == '.git' or part.lower().startswith('git~') for part in parts):
+            raise ValueError("workspace_setup: Git control paths are forbidden")
+        return destination
 
     def source(self, path: str) -> str:
         """Pack-relative source of a staged path."""
@@ -51,13 +55,17 @@ class WorkspaceSetup:
             raise ValueError("workspace_setup: git_commit must be a boolean")
         root = value.get("root")
         if root is not None and (not isinstance(root, str) or not root or "\x00" in root
-                                 or Path(root).is_absolute() or ".." in Path(root).parts):
+                                 or PureWindowsPath(root).is_absolute() or Path(root).is_absolute()
+                                 or "\\" in root or ".." in Path(root).parts):
             raise ValueError("workspace_setup: root must be a relative directory in the pack")
         files, dirty = paths("files"), paths("dirty_files")
-        if root is not None and any(Path(item).is_absolute() or ".." in Path(item).parts
+        if root is not None and any(Path(item).is_absolute() or PureWindowsPath(item).drive
+                                    or "\\" in item or ".." in Path(item).parts
                                     for item in (*files, *dirty)):
             raise ValueError("workspace_setup: rooted paths must stay inside root")
         setup = cls(files=files, git_commit=git_commit, dirty_files=dirty, root=root)
+        for item in (*files, *dirty):
+            setup.destination(item)
         if setup.git_commit and not setup.files:
             raise ValueError("workspace_setup: git_commit needs files to commit")
         return setup
