@@ -132,14 +132,18 @@ def _copy_inputs(dataset_root: Path, workspace: Path, paths: Sequence[str]) -> l
 
 
 _GIT_IDENTITY = ("-c", "user.name=acp-eval", "-c", "user.email=acp-eval@example.invalid",
-                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main")
+                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+                 "-c", f"core.hooksPath={os.devnull}")
 
 
 def _prepare_workspace(dataset_root: Path, workspace: Path, setup: WorkspaceSetup) -> None:
     """Stage project files (not attachments), optionally as a git baseline plus dirty work."""
     if not setup.files and not setup.dirty_files:
         return
-    _copy_inputs(dataset_root, workspace, setup.files)
+    # Validate both phases before any copy or Git invocation.
+    for path in (*setup.files, *setup.dirty_files):
+        setup.destination(path)
+    _stage(dataset_root, workspace, setup, setup.files)
     if setup.git_commit:
         git = shutil.which("git")
         if git is None:
@@ -147,7 +151,23 @@ def _prepare_workspace(dataset_root: Path, workspace: Path, setup: WorkspaceSetu
         for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "baseline"]):
             subprocess.run([git, *_GIT_IDENTITY, *args], cwd=workspace, check=True,
                            capture_output=True, timeout=30)
-    _copy_inputs(dataset_root, workspace, setup.dirty_files)
+    _stage(dataset_root, workspace, setup, setup.dirty_files)
+
+
+def _stage(dataset_root: Path, workspace: Path, setup: WorkspaceSetup, paths: Sequence[str]) -> None:
+    if setup.root is None:
+        _copy_inputs(dataset_root, workspace, paths)
+        return
+    root = dataset_root.resolve()
+    for relative_path in paths:
+        source = (root / setup.source(relative_path)).resolve()
+        target = (workspace / setup.destination(relative_path)).resolve()
+        source.relative_to(root)
+        target.relative_to(workspace.resolve())
+        if not source.is_file():
+            raise FileNotFoundError(f"missing workspace_setup file: {source}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _new_attempt_dir(case_dir: Path) -> tuple[str, Path]:

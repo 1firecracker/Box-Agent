@@ -1114,3 +1114,52 @@ def test_invalid_workspace_setup_is_rejected(setup) -> None:
 
     with pytest.raises(ValueError, match="workspace_setup"):
         WorkspaceSetup.from_record({"workspace_setup": setup})
+
+
+def test_rooted_workspace_setup_keeps_nested_project_layout(tmp_path: Path) -> None:
+    config = make_config(tmp_path, "normal")
+    case_root = config.dataset_root / "case-nested"
+    (case_root / "pkg").mkdir(parents=True)
+    (case_root / "AGENTS.md").write_text("root rules\n", encoding="utf-8")
+    (case_root / "pkg/AGENTS.md").write_text("pkg rules\n", encoding="utf-8")
+    (case_root / "pkg/textutil.py").write_text("x = 1\n", encoding="utf-8")
+    record = {"id": "normal", "query": "execute normal", "input_files": [],
+              "workspace_setup": {"root": "case-nested",
+                                  "files": ["AGENTS.md", "pkg/AGENTS.md", "pkg/textutil.py"]}}
+
+    run_case(record, config)
+
+    workspace = next((config.evaluation_dir / "cases/normal/attempts").iterdir()) / "workspace"
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "root rules\n"
+    assert (workspace / "pkg/AGENTS.md").read_text(encoding="utf-8") == "pkg rules\n"
+    assert (workspace / "pkg/textutil.py").is_file()
+
+
+@pytest.mark.parametrize("setup", [
+    {"root": "/abs", "files": ["a.py"]},
+    {"root": "../escape", "files": ["a.py"]},
+    {"root": "case", "files": ["../a.py"]},
+])
+def test_rooted_workspace_setup_cannot_escape_the_pack(setup) -> None:
+    from acp_eval.models import WorkspaceSetup
+
+    with pytest.raises(ValueError, match="workspace_setup"):
+        WorkspaceSetup.from_record({"workspace_setup": setup})
+
+
+@pytest.mark.parametrize('path', ['.git/hooks/pre-commit', '.GiT/config', '.git./config', 'pkg/.git/config'])
+def test_rooted_setup_rejects_git_control_paths_before_copy(tmp_path, path):
+    from acp_eval.models import WorkspaceSetup
+    with pytest.raises(ValueError, match='Git control'):
+        WorkspaceSetup.from_record({'workspace_setup': {'root': 'fixture', 'files': [path], 'git_commit': True}})
+
+
+def test_setup_rejects_unsafe_dirty_phase_before_git_runs(tmp_path):
+    from acp_eval.models import WorkspaceSetup
+    from acp_eval.case_runner import _prepare_workspace
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    setup = WorkspaceSetup(root='fixture', files=('safe.txt',), dirty_files=('.git/config',), git_commit=True)
+    with pytest.raises(ValueError, match='Git control'):
+        _prepare_workspace(tmp_path, workspace, setup)
+    assert list(workspace.iterdir()) == []
