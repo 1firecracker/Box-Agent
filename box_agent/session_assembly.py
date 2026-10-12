@@ -679,6 +679,7 @@ def _compose_session_prompt(
     host_ui_hints: bool,
     available_tools: frozenset[str] | None = None,
     child_prompt_segments: list[str] | None = None,
+    skill_sourcing_provided: bool = False,
 ) -> str:
     """Template plus the ordered session overlays shared by every adapter.
 
@@ -694,7 +695,8 @@ def _compose_session_prompt(
     else:
         template = template.replace("{SKILLS_METADATA}", "")
     base_prompt = compose_prompt_segments(
-        resolve_capability_placeholders(render_system_prompt_template(template), available_tools),
+        resolve_capability_placeholders(render_system_prompt_template(template), available_tools,
+                                       skill_sourcing_provided=skill_sourcing_provided),
         replacements={
             "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
             "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
@@ -707,7 +709,8 @@ def _compose_session_prompt(
     )
     if child_prompt_segments is not None:
         child_prompt_segments.append(compose_prompt_segments(
-            resolve_capability_placeholders(render_system_prompt_template(child_template), available_tools),
+            resolve_capability_placeholders(render_system_prompt_template(child_template), available_tools,
+                                           skill_sourcing_provided=skill_sourcing_provided),
             replacements={
                 "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
                 "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
@@ -807,6 +810,8 @@ def build_session_prompt(
     child_prompt_segments: list[str] | None = None,
 ) -> str:
     """The one system-prompt builder for CLI, ACP and Python SDK sessions."""
+    from .tools.skillhub_search_tool import SKILL_SOURCE_DISCOVERY_PROMPT
+
     prompt = _compose_session_prompt(
         config, template, memory, session_mode,
         workspace=workspace,
@@ -824,6 +829,7 @@ def build_session_prompt(
         host_ui_hints=host_ui_hints,
         available_tools=available_tools,
         child_prompt_segments=child_prompt_segments,
+        skill_sourcing_provided=SKILL_SOURCE_DISCOVERY_PROMPT in (prompt_suffix or ""),
     )
     from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
 

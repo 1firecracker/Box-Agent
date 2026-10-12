@@ -433,3 +433,36 @@ async def test_skill_sourcing_rule_is_stated_once(tmp_path, marketplace):
     assert "不等于仅从 Skill 市场安装" not in prompt
     assert ("未指定来源时搜索 GitHub 等公开来源并核对仓库与 SKILL.md" in prompt) is (not marketplace)
     assert "design 改成 fast" not in prompt
+
+
+async def test_supplied_marketplace_tool_retains_source_and_denial_rules(tmp_path):
+    from types import SimpleNamespace
+    from box_agent.acp import BoxACPAgent
+    from box_agent.tools.skillhub_search_tool import SkillHubSearchTool
+    from tests.test_acp import DoneLLM, DummyConn
+
+    async def searcher(request):
+        return {'results': []}
+
+    config = Config(llm=LLMConfig(api_key='test'),
+                    agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
+                    tools=ToolsConfig(enable_mcp=False, enable_skills=False))
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [SkillHubSearchTool(searcher)], _template())
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    assert 'search_skillhub' in state.agent.tools
+    assert state.agent.system_prompt.count('不得绕过用户已拒绝的安装授权') == 1
+    assert '继续搜索 GitHub 等公开来源并核对仓库与 SKILL.md' in state.agent.system_prompt
+    await state.aclose()
+
+
+def test_python_builder_and_child_keep_sourcing_without_a_suffix(tmp_path):
+    from box_agent.session_assembly import build_session_prompt
+
+    config = Config(llm=LLMConfig(api_key='test'), agent=AgentConfig(), tools=ToolsConfig())
+    child = []
+    prompt = build_session_prompt(config, _template(), workspace=tmp_path, session_mode=None,
+                                  available_tools=frozenset({'search_skillhub'}), child_prompt_segments=child)
+    for text in [prompt, '\n'.join(child)]:
+        assert text.count('不得绕过用户已拒绝的安装授权') == 1
+        assert '继续搜索 GitHub 等公开来源并核对仓库与 SKILL.md' in text

@@ -43,9 +43,7 @@ _USER_DECISION_FULL = (
     '** 已授权操作直接继续，不重复确认；新增未授权的敏感事项须等待用户选择，不得自动提交。'
 )
 
-# Marketplace-aware sourcing lives in search_skillhub's description and the ACP
-# capability-gap prompt whenever that tool is registered; repeating it here only
-# costs every other session. Without the marketplace a short generic rule remains.
+# Only an actually assembled source-discovery suffix replaces the template rule.
 _SKILL_SOURCING_FULL = (
     "- 用户要求查找或安装 Skill 但未指定来源时，不等于仅从 Skill 市场安装；默认发现来源，无需另行要求。"
     "可先查市场，未命中或不可用时继续搜索 GitHub 等公开来源并核对仓库与 SKILL.md；只有用户明确限定仅从市场安装时才不扩展来源。"
@@ -58,11 +56,11 @@ _SKILL_SOURCING_WITHOUT_MARKETPLACE = (
 )
 
 
-def _render_skill_sourcing(tools: Collection[str] | None) -> str:
-    if tools is None:
-        return _SKILL_SOURCING_FULL
-    if "search_skillhub" in tools:
+def _render_skill_sourcing(tools: Collection[str] | None, provided: bool) -> str:
+    if provided:
         return ""
+    if tools is None or "search_skillhub" in tools:
+        return _SKILL_SOURCING_FULL
     return _SKILL_SOURCING_WITHOUT_MARKETPLACE
 
 
@@ -146,7 +144,7 @@ def _render_analysis_execution(tools: Collection[str] | None) -> str:
 
 
 
-def resolve_capability_placeholders(text: str, tools: Collection[str] | None) -> str:
+def resolve_capability_placeholders(text: str, tools: Collection[str] | None, *, skill_sourcing_provided: bool = False) -> str:
     """Fill every capability placeholder a template or mode prompt may carry."""
     if PLANNING_TOOLS_PLACEHOLDER in text:
         text = text.replace(PLANNING_TOOLS_PLACEHOLDER, render_planning_tools(tools))
@@ -165,7 +163,7 @@ def resolve_capability_placeholders(text: str, tools: Collection[str] | None) ->
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
     if "{SKILL_SOURCING}" in text:
-        sourcing = _render_skill_sourcing(tools)
+        sourcing = _render_skill_sourcing(tools, skill_sourcing_provided)
         # An empty render drops the whole list line, not just the placeholder.
         text = text.replace("\n{SKILL_SOURCING}", f"\n{sourcing}" if sourcing else "")
         text = text.replace("{SKILL_SOURCING}", sourcing)
