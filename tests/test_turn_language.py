@@ -71,3 +71,7 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
 def test_other_latin_script_languages_are_not_forced_to_english(text):
     assert request_language(text) is None
     assert with_deliverable_language_hint(text) == text
+
+
+def test_common_english_question_is_recognized():
+    assert request_language('Can you check whether this API key looks valid? It should use the documented format.') == 'English'

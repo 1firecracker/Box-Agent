@@ -19,7 +19,7 @@ import re
 # deliverable and should not gain a hint.
 _MIN_LETTERS = 30
 _MAX_CJK_SHARE = 0.1
-_ENGLISH_CUES = frozenset({"a", "the", "this", "please", "write", "create", "build", "save",
+_ENGLISH_CUES = frozenset({"a", "the", "this", "please", "write", "create", "build", "save", "can", "you", "check", "whether", "should", "it",
                            "based", "on", "and", "as", "for", "from", "with", "into", "summarize"})
 # Spans that say nothing about the user's language: code, URLs, paths, tags,
 # and slash commands such as "/pptx".
