@@ -25,8 +25,9 @@ _ENGLISH_CUES = frozenset({"the", "this", "please", "write", "create", "build", 
 # Spans that say nothing about the user's language: code, URLs, paths, tags,
 # and slash commands such as "/pptx".
 _NOISE = re.compile(
-    r"```.*?```|`[^`]*`|https?://\S+|(?:[\w.-]+/)+[\w.-]+|<[^>]+>|(?<!\S)/[\w-]+", re.DOTALL,
+    r"```.*?```|`[^`]*`|https?://\S+|(?<![\w.-])(?:[\w.-]+/)+[\w.-]+|<[^<>]+>|(?<!\S)/[\w-]+", re.DOTALL,
 )
+_QUOTE_ENDS = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
 
 _HINTS = {
     "English": (
@@ -42,11 +43,27 @@ _HINTS = {
 }
 
 
+def _without_quoted_text(text: str) -> str:
+    """Skip reference quotations in one pass, including an unclosed final quote."""
+    closing = None
+    kept = []
+    for char in text:
+        if closing is not None:
+            if char == closing:
+                closing = None
+        elif char in _QUOTE_ENDS:
+            closing = _QUOTE_ENDS[char]
+        else:
+            kept.append(char)
+    return ''.join(kept)
+
+
 def request_language(text: str) -> str | None:
     """Return "English" or "Japanese" for a clearly non-Chinese request, else None."""
     content = _NOISE.sub(" ", text)
-    kana = sum(1 for char in content if "぀" <= char <= "ヿ")
-    han = sum(1 for char in content if "一" <= char <= "鿿")
+    unquoted = _without_quoted_text(content)
+    kana = sum(1 for char in unquoted if "぀" <= char <= "ヿ")
+    han = sum(1 for char in unquoted if "一" <= char <= "鿿")
     latin = sum(1 for char in content if char.isascii() and char.isalpha())
     words = set(re.findall(r"\b[a-z]+\b", content.lower()))
     clear_english = latin >= _MIN_LETTERS and len(words & _ENGLISH_CUES) >= 3

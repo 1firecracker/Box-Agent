@@ -576,5 +576,6 @@ logger.debug(f"工具结果: {result.content[:200]}")
 输出语种优先。对话回复和进度说明跟随宿主的界面语种（如 ACP `ui_language`）。
 CLI、Python SDK 和 ACP 共用回合提醒生成器；只有有足够英文线索或日文假名的
 原始请求触发，无法可靠判断的语言不强制成英文，utility 会话和自动续跑不添加提醒。
+日文判断排除引用的参考正文；不确定时沿用系统提示词规则，避免资料语种覆盖请求语种。
 宿主若把内部生成的续跑文字作为 `RunRequest.user_message` 传入，应设置
 `metadata={"synthetic_continuation": True}`；普通 SDK 用户请求不设置此标记。

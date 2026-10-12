@@ -91,3 +91,33 @@ def test_chinese_request_referencing_japanese_does_not_gain_a_japanese_hint(phra
     text = f'请解释一下{phrase}这句话是什么意思。'
     assert request_language(text) is None
     assert with_deliverable_language_hint(text) == text
+
+
+@pytest.mark.parametrize('opening,closing', [('"', '"'), ("'", "'"), ('“', '”'), ('‘', '’'), ('「', '」'), ('『', '』')])
+def test_chinese_request_quoting_japanese_paragraph_is_not_forced_to_japanese(opening, closing):
+    paragraph = ('こちらの商品は、みなさまにもっと便利にお使いいただけるように、'
+                 'さまざまな新しい機能をそなえています。ご利用になるまえに、'
+                 'こちらの説明をよくお読みください。')
+    text = f'请解释这段日文的意思，并保存成说明文档：{opening}{paragraph}{closing}'
+    assert request_language(text) is None
+    assert with_deliverable_language_hint(text) == text
+
+
+def test_japanese_request_with_quoted_title_is_still_recognized():
+    text = 'product.md をもとに「新しい商品」の短い紹介文を書いて blurb.md に保存してください。'
+    assert request_language(text) == 'Japanese'
+
+
+@pytest.mark.parametrize('character', ['f', '<', '“'])
+def test_large_plain_text_language_detection_completes(character):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # A quadratic path regex took minutes on this input. A subprocess keeps a
+    # regression bounded while allowing ample time for slow CI hosts.
+    script = ("import runpy; request_language = runpy.run_path('box_agent/turn_language.py')['request_language']; "
+              f"text = 'Write a short note for the board and save it as note.md. ' + {character!r} * 262144; "
+              "assert request_language(text) == 'English'")
+    subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
+                   check=True, timeout=10, capture_output=True, text=True)
