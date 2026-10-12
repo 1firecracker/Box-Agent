@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+_MAX_NOTICE_CREDENTIALS = 8
+
 _PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{15,}"),
     re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"),
@@ -43,7 +45,7 @@ def _password_values(text: str) -> list[tuple[int, str]]:
 
 
 def detect_credentials(text: str) -> list[str]:
-    """Credential-like values in ``text``, in order of appearance, without duplicates."""
+    """Up to eight credential examples, in appearance order, without duplicates."""
     found: list[tuple[int, str]] = []
     for pattern in _PATTERNS:
         for match in pattern.finditer(text):
@@ -57,6 +59,8 @@ def detect_credentials(text: str) -> list[str]:
     for _, value in sorted(found, key=lambda item: (item[0], -len(item[1]))):
         if value not in values and not any(value in other or other in value for other in values):
             values.append(value)
+            if len(values) >= _MAX_NOTICE_CREDENTIALS:
+                break
     return values
 
 
@@ -74,7 +78,8 @@ def credential_notice(text: str) -> str | None:
     passwords = {value for _, value in _password_values(text)}
     masked = "、".join(f"`{mask_credential(value, password=any(value in password for password in passwords))}`" for value in values)
     return (
-        f"[敏感信息：本条消息含疑似凭据（{masked}）。回复、写入的文件和执行的命令中都不要出现其完整值："
+        f"[敏感信息：本条消息含疑似凭据（{masked}）。以上仅为脱敏示例；"
+        "回复、写入的文件和执行的命令中都不要出现任何凭据的完整值："
         "回复里需要指代时只用上面的脱敏形式；代码和配置改为从环境变量或配置项读取（如 `${DB_PASSWORD}`）；"
         "不要把它写进命令参数，需要实际调用时请用户在本地执行。]"
     )

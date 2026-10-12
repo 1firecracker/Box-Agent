@@ -122,3 +122,18 @@ def test_token_also_used_as_part_of_a_password_receives_a_fully_masked_notice():
     notice = credential_notice(text)
     assert TOKEN[:8] not in notice and TOKEN[-4:] not in notice
     assert '`****`' in notice
+
+
+@pytest.mark.parametrize('password_later', [False, True])
+def test_many_credentials_produce_a_bounded_notice_without_truncating_the_request(password_later):
+    tokens = [TOKEN] + ['sk-fixture' + format(i, '08d') + 'x' * 16 for i in range(1000)]
+    text = '\n'.join(tokens)
+    if password_later:
+        text += f'\npassword: "{TOKEN} with spaces"'
+    notice = credential_notice(text)
+    assert len(notice) < 1000
+    assert len(detect_credentials(text)) <= 8
+    assert '任何凭据' in notice
+    assert with_turn_hints(text).startswith(text)
+    if password_later:
+        assert TOKEN[:8] not in notice and TOKEN[-4:] not in notice

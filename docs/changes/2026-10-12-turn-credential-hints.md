@@ -9,6 +9,8 @@ The reminder is enabled by default for matching user messages. Passwords and
 unprefixed secret material are fully masked; long known prefixed tokens can be
 identified with a shortened form. The notice asks the model to avoid full values
 in replies, files and commands and use environment-backed configuration instead.
+At most eight masked examples are shown to keep large inputs from expanding the
+reminder; the instruction still applies to every credential in the message.
 Language and credential reminders are combined once. SDK/CLI routing still sees
 raw user input. ACP derives reminders before adding host prefixes; its existing
 message-preparation path owns appending them. Explicit utility sessions and
