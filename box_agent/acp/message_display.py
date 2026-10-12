@@ -31,7 +31,7 @@ class MessageDisplay:
         # message_id 用于拼接同一回答；output_id 区分每次模型输出，补写也必须重新分配。
         # 这样客户端既能接回被截断的正文，也不会把补写快照误判成旧快照。
         self.output_id: str | None = None
-        self.text = ""
+        self.text_parts: list[str] = []
         self.last_text = ""
         self.answer_ids: list[str] = []
         self.final_ids: list[str] = []
@@ -42,7 +42,7 @@ class MessageDisplay:
                 self.message_id = uuid4().hex
             if self.output_id is None:
                 self.output_id = uuid4().hex
-            self.text += event.content
+            self.text_parts.append(event.content)
             return {"version": 1, "messageId": self.message_id, "outputId": self.output_id}
         if isinstance(event, LLMOutputEvent):
             identifier = self.message_id or uuid4().hex
@@ -55,7 +55,7 @@ class MessageDisplay:
             self.last_text = event.content
             self.message_id = None
             self.output_id = None
-            self.text = ""
+            self.text_parts = []
             return {"version": 1, "messageId": identifier, "outputId": output_id}
         if isinstance(event, InjectedMessageEvent):
             # Text continuation completes a truncated answer. Task continuation,
@@ -69,9 +69,10 @@ class MessageDisplay:
                 else None
             )
             self.output_id = None
-            self.text = ""
+            self.text_parts = []
         if isinstance(event, DoneEvent) and event.stop_reason == StopReason.END_TURN:
-            if self.message_id and self.text == event.final_content and self.text.strip():
+            text = "".join(self.text_parts)
+            if self.message_id and text == event.final_content and text.strip():
                 self.final_ids = [self.message_id]
             elif self.last_text == event.final_content and self.last_text.strip():
                 self.final_ids = self.answer_ids.copy()
