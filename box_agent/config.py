@@ -874,7 +874,7 @@ class Config(BaseModel):
 # Prompt templates a user may override in ~/.box-agent/config (or BOX_AGENT_HOME).
 PROMPT_TEMPLATE_FILES = ("system_prompt.md", "analysis_prompt.md", "code_prompt.md")
 _PROMPT_PLACEHOLDER = re.compile(r"\{[A-Z][A-Z_]{2,}\}|\{\{\.[A-Za-z]+\}\}")
-_warned_prompt_overrides: set[tuple[str, int]] = set()
+_warned_prompt_overrides: set[tuple[str, int, str]] = set()
 
 
 def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
@@ -902,9 +902,9 @@ def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
 
 
 def _warn_prompt_override_drift(path: Path, filename: str) -> None:
-    """Warn once per override file version; never change which file is used."""
+    """Warn once per file version and template role; never change the file used."""
     try:
-        key = (str(path.resolve()), path.stat().st_mtime_ns)
+        key = (str(path.resolve()), path.stat().st_mtime_ns, filename)
     except OSError:
         return
     if key in _warned_prompt_overrides:

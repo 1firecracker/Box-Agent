@@ -111,3 +111,28 @@ def test_invalid_encoding_is_a_structured_doctor_warning(override_home, capsys):
     status = _doctor_prompt_status()
     assert status['status'] == 'warning'
     assert status['overrides'][0]['error'] == 'UnicodeDecodeError'
+
+
+def test_template_named_for_another_role_reports_configured_role(override_home, capsys):
+    target = override_home / "analysis_prompt.md"
+    target.write_text(_packaged("analysis_prompt.md"), encoding="utf-8")
+
+    assert Config.find_prompt_file("analysis_prompt.md", "system_prompt.md") == target
+
+    warning = capsys.readouterr().err
+    assert warning.count("prompt override") == 1
+    assert "this version's system_prompt.md" in warning
+
+
+def test_shared_template_is_checked_once_per_role(override_home, capsys):
+    target = override_home / "shared.md"
+    target.write_text(_packaged("system_prompt.md"), encoding="utf-8")
+
+    Config.find_prompt_file("shared.md", "system_prompt.md")
+    assert capsys.readouterr().err == ""
+    Config.find_prompt_file("shared.md", "analysis_prompt.md")
+    Config.find_prompt_file("shared.md", "analysis_prompt.md")
+
+    warning = capsys.readouterr().err
+    assert warning.count("prompt override") == 1
+    assert "this version's analysis_prompt.md" in warning
