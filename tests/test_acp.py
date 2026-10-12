@@ -4278,6 +4278,24 @@ async def test_acp_turn_executes_tool(acp_agent):
         and update.update.rawOutput.get("type") == "agent_progress"
     ]
     assert progress_outputs == []
+    # Legacy chunks are unchanged; identity metadata distinguishes the tool
+    # preamble from the final answer only after the outer prompt settles.
+    chunks = [u.update for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+    ids = {u.content.text: u.field_meta["messageDisplay"]["messageId"] for u in chunks}
+    receipt = response.field_meta["messageDisplay"]
+    assert ids["calling tool"] != ids["done"]
+    assert receipt["finalMessageIds"] == [ids["done"]]
+    assert receipt["durationMs"] >= 0
+    assert all("phase" not in u.field_meta["messageDisplay"] for u in chunks)
+    # ACP 标准字段和原有正文保持不变；老客户端忽略 _meta 即可按原流程消费。
+    for chunk in chunks:
+        wire = chunk.model_dump(by_alias=True, exclude_none=True)
+        wire.pop("_meta", None)
+        assert wire == {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk.content.text}}
+    for payload in llm_outputs:
+        source = next(chunk for chunk in chunks if chunk.content.text == payload["content"])
+        assert payload["messageDisplay"] == source.field_meta["messageDisplay"]
+
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
 
@@ -4877,6 +4895,10 @@ async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path)
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
     assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
     assert llm.calls == 3
+    receipt = response.field_meta["messageDisplay"]
+    chunks = [u.update for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+    assert receipt["finalMessageIds"] == [chunks[-1].field_meta["messageDisplay"]["messageId"]]
+    assert chunks[0].field_meta["messageDisplay"]["messageId"] not in receipt["finalMessageIds"]
     state = agent._sessions[session.sessionId]
     assert state.agent.goal is not None
     assert state.agent.goal.status == "complete"
@@ -4914,6 +4936,7 @@ async def test_acp_goal_autopilot_stops_when_budget_exhausted(tmp_path):
     assert response.stopReason == "max_turn_requests"
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
     assert response.field_meta["goalAutopilot"]["budgetExhausted"] is True
+    assert response.field_meta["messageDisplay"]["finalMessageIds"] == []
     assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is False
     assert llm.calls == 2
     state = agent._sessions[session.sessionId]
@@ -8451,3 +8474,59 @@ async def test_acp_mcp_status_reports_browser_isolation_mode(tmp_path, monkeypat
     result = await agent.extMethod("mcp/status", {})
 
     assert result["browser"] == snapshot
+
+
+@pytest.mark.parametrize("kind, reuse_id", [("text_continuation", True), ("task_continuation", False), ("stream_recovery", False)])
+def test_display_receipt_preserves_only_explicit_text_continuations(kind, reuse_id):
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent, DoneEvent, StopReason
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    first = display.observe(ContentEvent(content="first", _streaming=True))["messageId"]
+    display.observe(LLMOutputEvent(step=1, content="first"))
+    display.observe(MessageInjection(InjectionKind(kind), "internal").apply([]))
+    last = display.observe(ContentEvent(content="last", _streaming=True))["messageId"]
+    display.observe(LLMOutputEvent(step=2, content="last"))
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == []
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="last"))
+    ids = display.receipt(completed=True, duration_ms=1)["finalMessageIds"]
+    assert ids == [last]
+    assert (first == last) is reuse_id
+    assert display.receipt(completed=False, duration_ms=1)["finalMessageIds"] == []
+    display.begin_run()
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == []
+
+
+def test_display_receipt_does_not_merge_partial_failed_stream_into_retry():
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent, DoneEvent, StopReason
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    partial = display.observe(ContentEvent(content="partial", _streaming=True))["messageId"]
+    display.observe(MessageInjection(InjectionKind.STREAM_RECOVERY, "retry").apply([]))
+    final = display.observe(ContentEvent(content="answer", _streaming=True))["messageId"]
+    assert partial != final
+    display.observe(LLMOutputEvent(step=2, content="answer"))
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="answer"))
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == [final]
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_display_output_identity_changes_for_continuation_snapshot(streamed):
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    first = display.observe(ContentEvent(content="Hello wor", _streaming=True))
+    first_snapshot = display.observe(LLMOutputEvent(step=1, content="Hello wor"))
+    assert first == first_snapshot
+    display.observe(MessageInjection(InjectionKind.TEXT_CONTINUATION, "continue").apply([]))
+    second = display.observe(ContentEvent(content="ld.", _streaming=True)) if streamed else None
+    second_snapshot = display.observe(LLMOutputEvent(step=2, content="ld."))
+    assert first["messageId"] == second_snapshot["messageId"]
+    assert first["outputId"] != second_snapshot["outputId"]
+    if streamed:
+        assert second == second_snapshot

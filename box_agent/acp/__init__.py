@@ -1,5 +1,9 @@
 """ACP (Agent Client Protocol) bridge for Box-Agent.
 
+本模块是执行事件与客户端 ACP 协议之间的适配层。
+工作过程的身份跟踪交给 acp/message_display.py；本层透传元数据，
+并在自动续跑与清理结束后发布最终回执，不在每次模型调用结束时提前判定。
+
 Consumes the shared ``AgentSession.run_events`` facade instead of maintaining its own
 agent loop or importing the core implementation.  This gives ACP access to
 summarization, logging, and safety — features the old ``_run_turn``
@@ -67,6 +71,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
+from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionManager
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
@@ -2915,6 +2920,7 @@ class BoxACPAgent:
             state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
         )
+        message_display = MessageDisplay()
         autopilot = GoalAutopilotController(
             started_at=prompt_start,
             max_turns=state.config.agent.goal_autopilot_max_turns,
@@ -2929,6 +2935,7 @@ class BoxACPAgent:
                 stop_reason = await self._run_turn(
                     state,
                     session_id,
+                    message_display=message_display,
                     task_context=task_context,
                     turn_id=turn_id,
                     billing_session_id=billing_session_id,
@@ -2967,6 +2974,7 @@ class BoxACPAgent:
                     stop_reason = await self._run_turn(
                         state,
                         session_id,
+                        message_display=message_display,
                         task_context=task_context,
                         turn_id=turn_id,
                         billing_session_id=billing_session_id,
@@ -3189,6 +3197,20 @@ class BoxACPAgent:
                 "turn_id": turn_id,
             }
         }
+        # 只在最外层用户请求结束时发布一次最终回答回执，不在每个内部 DoneEvent 时发布。
+        # 自动续跑可能替换阶段性回答，资源清理失败也可能改变最终状态。
+        # 因此必须在这些步骤完成后确认；等待审批、失败或预算耗尽都不触发成功折叠。
+        response_meta["messageDisplay"] = message_display.receipt(
+            completed=(
+                not failed
+                and not waiting_for_user
+                and state.pending_plan_approval is None
+                and stop_reason == StopReason.END_TURN.value
+                and not autopilot.budget_exhausted
+                and not autopilot.no_progress_exhausted
+            ),
+            duration_ms=duration_ms,
+        )
         if state.agent.goal is not None or autopilot.continuations > 0:
             response_meta["goalAutopilot"] = {
                 "enabled": auto_enabled,
@@ -4085,8 +4107,11 @@ class BoxACPAgent:
         explicitly_selected_skill_names: tuple[str, ...] = (),
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
+        message_display: MessageDisplay | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
+        message_display = message_display or MessageDisplay()
+        message_display.begin_run()
         self._config_for_session(state)
         if task_context is None:
             fallback_turn_id = turn_id or state.run_handle.current_turn_id or session_id
@@ -4602,6 +4627,8 @@ class BoxACPAgent:
         async with aclosing(events):
             async for envelope in events:
                 event = envelope.payload
+                # 为本次正文事件保留稳定身份，原始正文和发送顺序保持不变。
+                display_meta = message_display.observe(event)
                 try:
                     await _sync_explicit_skill_deliveries()
                     match event:
@@ -4624,12 +4651,16 @@ class BoxACPAgent:
                                     chars=len(event.content),
                                     content=event.content,
                                 )
-                                await self._send(session_id, update_agent_message(text_block(event.content)))
+                                update = update_agent_message(text_block(event.content))
+                                update.field_meta = {"messageDisplay": display_meta}
+                                await self._send(session_id, update)
 
                         case ContentEvent(content=text):
                             log.debug("content/final", session_id=session_id, chars=len(text), content=text)
                             log.debug("content", session_id=session_id, content=text)
-                            await self._send(session_id, update_agent_message(text_block(text)))
+                            update = update_agent_message(text_block(text))
+                            update.field_meta = {"messageDisplay": display_meta}
+                            await self._send(session_id, update)
 
                         case ProgressEvent(step=s, content=text):
                             payload = {
@@ -4683,6 +4714,8 @@ class BoxACPAgent:
                         ):
                             payload = {
                                 "type": "llm_output",
+                                # 完整输出与流式片段共用身份，客户端补回正文时据此去重。
+                                "messageDisplay": display_meta,
                                 "step": s,
                                 "content": content,
                                 "thinking": thinking,
