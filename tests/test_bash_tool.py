@@ -56,7 +56,8 @@ async def test_cancelled_foreground_command_reaps_process_before_returning(tmp_p
     task = asyncio.create_task(tool.invoke({"command": "python waiting.py"}))
 
     async def wait_started():
-        while not started.exists():
+        # Child readiness can precede create_subprocess_exec returning to us.
+        while not processes or not started.exists():
             await asyncio.sleep(0.01)
 
     try:
