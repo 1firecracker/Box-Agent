@@ -160,7 +160,8 @@ def test_system_prompt_pauses_only_for_blocking_input_or_sensitive_decisions():
     assert decision_schema["requested_auto_submit_seconds"]["default"] == 30
     assert "推荐默认项（`default_option_id`）并请求 30 秒倒计时" in prompt
     assert "若已给出 `default_option_id`，超时或自动提交时必须采用该默认项" in prompt
-    assert "不得改选其他偏好（例如把 design 改成 fast）" in prompt
+    assert "不得改选其他偏好" in prompt
+    assert "design 改成 fast" not in prompt  # PPT-specific; the presentation-mode envelope owns it
     assert "已授权操作直接继续，不重复确认" in prompt
     assert "新增未授权的敏感事项须等待用户选择，不得自动提交" in prompt
 
