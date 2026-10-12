@@ -830,6 +830,15 @@ class BackgroundShellManager:
         if not shell:
             raise ValueError(f"Shell not found: {bash_id}")
 
+        # A stopped reader cannot drain a paused pipe. Close that pipe before
+        # process.wait(), which can otherwise wait for pipe EOF after exit.
+        reader = cls._monitor_tasks.get(bash_id)
+        if reader is None or reader.done():
+            transport = getattr(shell.process, "_transport", None)
+            pipe = transport.get_pipe_transport(1) if transport is not None else None
+            if pipe is not None:
+                pipe.close()
+
         # Terminate the process
         await shell.terminate()
 
