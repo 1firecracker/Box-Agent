@@ -5691,7 +5691,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             defer_skills=True,
             mcp_start_gate=mcp_start_gate,
         )
-        prompt_path = Config.find_config_file(config.agent.system_prompt_path)
+        prompt_path = Config.find_prompt_file(config.agent.system_prompt_path, "system_prompt.md")
         if prompt_path and prompt_path.exists():
             # Keep {{.CurrentDate}} unrendered: build_acp_session_prompt renders
             # it per session, so a server that outlives midnight stays correct.

@@ -92,7 +92,7 @@ box-agent-acp
 
 **Shared types** (`schema/`): Core Pydantic/Enum definitions (`LLMProvider`, `Message`, `ToolCall`, `LLMResponse`, `TokenUsage`, `StreamEvent`) re-exported via `schema/__init__.py`. `utils/terminal_utils.py` holds CJK-aware terminal width helpers (`calculate_display_width`, `truncate_with_ellipsis`, `pad_to_width`).
 
-**Config** (`config.py`): Pydantic models. Load priority: `box_agent/config/` (dev) → `~/.box-agent/config/` (installed) → package directory (fallback). Main files: `config.yaml`, `system_prompt.md`, `analysis_prompt.md`, `code_prompt.md`, `mcp.json`.
+**Config** (`config.py`): Pydantic models. Load priority: `box_agent/config/` (dev) → `~/.box-agent/config/` (installed) → package directory (fallback). Main files: `config.yaml`, `system_prompt.md`, `analysis_prompt.md`, `code_prompt.md`, `mcp.json`. A user override of a prompt template (`~/.box-agent/config/*.md` or `BOX_AGENT_HOME`) whose placeholders differ from the packaged template (missing new ones, or unknown ones that would leak verbatim) is still used but reported once on stderr and by `box-agent doctor` (`config.prompt_override_drift`).
 
 **CLI** (`cli.py`): Interactive mode with prompt_toolkit. In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/exit`. Subcommands: `setup`, `config`, `doctor`, `log`. Auto-launches setup wizard on first run or when API connection fails.
 

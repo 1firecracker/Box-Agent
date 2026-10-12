@@ -614,6 +614,7 @@ def test_cmd_doctor_json_returns_structured_status(monkeypatch, capsys) -> None:
         return cli._doctor_check("ok", "api ok")
 
     monkeypatch.setattr(cli, "_doctor_config_status", lambda: (cli._doctor_check("ok", "config ok"), object()))
+    monkeypatch.setattr(cli, "_doctor_prompt_status", lambda _config: cli._doctor_check("ok", "prompts ok"))
     monkeypatch.setattr(cli, "_doctor_api_status", fake_api_status)
     monkeypatch.setattr(cli, "_doctor_sandbox_status", lambda: cli._doctor_check("ok", "sandbox ok"))
     monkeypatch.setattr(cli, "_doctor_mcp_status", lambda: cli._doctor_check("warning", "mcp missing"))
