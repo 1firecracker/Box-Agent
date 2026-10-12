@@ -82,18 +82,27 @@ _PUBLISH_ARTIFACT_SCHEMA = {
             "After creating and checking a main user-facing file, declare it as "
             "a primary user-facing artifact. Call once for each requested deliverable. "
             "Already published builder outputs and images "
-            "do not need this call. Use it to promote selected intermediate files."
+            "do not need this call. Use it to promote selected intermediate files. "
+            "For a self-contained single-file script deliverable with verifiable ownership, first call "
+            "action=begin with its final path; generate and check the file at the returned "
+            "staging_path, then action=commit with the returned write_id. Only commit "
+            "replaces the final path and records generation. Plain publication never "
+            "proves who generated an existing file. HTML with relative assets and directory "
+            "builders must keep their existing generation/publication flow. Use action=abort to discard staging."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path inside the session workspace."},
+                "path": {"type": "string", "description": "Final file path inside the session workspace."},
+                "action": {"type": "string", "enum": ["publish", "begin", "commit", "abort"],
+                           "default": "publish"},
+                "write_id": {"type": "string", "description": "Exact transaction ID from begin."},
             },
-            "required": ["path"],
             "additionalProperties": False,
         },
     },
 }
+
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
 )

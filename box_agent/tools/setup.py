@@ -218,6 +218,8 @@ def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
         "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
         "需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。"
+        "脚本生成自包含的单文件交付物时，可先用 `publish_artifact(action=\"begin\", path=最终路径)` 获取 staging_path，"
+        "生成并验证该临时文件后用返回的 write_id 调用 commit；最终路径不变，提交凭证确认归属；依赖相对资源目录的 HTML 或多文件构建器继续原有生成和发布流程。"
         + ("构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
            if image else "构建器已登记的成品已发布，无需重复登记。")
         + "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
@@ -706,7 +708,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     relative_root = workspace_dir
-    tools.append(PublishArtifactTool(workspace_dir))
+    tools.append(PublishArtifactTool(workspace_dir, permission_engine=permission_engine))
 
     # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
