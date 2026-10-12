@@ -54,6 +54,7 @@ class AgentSession:
     memory_extractor: Any | None = None
     memory_manager: Any | None = field(default=None, kw_only=True)
     memory_runtime: Any | None = field(default=None, kw_only=True)
+    utility_session: bool = field(default=False, kw_only=True)
     inject_queue: asyncio.Queue[Any] = field(default_factory=InjectionManager)
     turn_active: bool = False
     memory_block: str | None = None
@@ -172,6 +173,7 @@ class AgentSession:
         child_system_prompt = state.pop("child_system_prompt", None)
         if child_system_prompt is not None and hasattr(agent, "set_child_system_prompt"):
             agent.set_child_system_prompt(child_system_prompt)
+        state.setdefault("utility_session", utility)
         return cls(agent=agent, config=config, **state)
 
     @classmethod

@@ -1063,6 +1063,7 @@ def test_cli_json_reports_waiting_for_user_without_completion(
 
 def _exercise_cli_source_binding(
     tmp_path, monkeypatch, *, task=None, inputs=(), on_run=None, autopilot=False,
+    user_messages=None,
 ):
     import base64
 
@@ -1109,6 +1110,9 @@ def _exercise_cli_source_binding(
         return [bash], None, None, None
 
     async def run(self, *args, **kwargs):
+        if user_messages is not None:
+            user_messages.append(next(message.content for message in reversed(self.messages)
+                                      if message.role == 'user'))
         captured.append(base64.b64decode(
             bash._subprocess_env["BOX_AGENT_SOURCE_TEXT_B64"]
         ).decode("utf-8"))
@@ -1153,6 +1157,18 @@ def test_cli_source_excludes_synthetic_goal_continuations(tmp_path, monkeypatch)
         tmp_path, monkeypatch, task=task, autopilot=True,
     )
     assert captured == [task, task]
+
+
+def test_cli_goal_autopilot_does_not_add_language_hint_to_internal_continuation(tmp_path, monkeypatch):
+    messages = []
+    task = "使用已有图片制作 PPT，不需要生图。"
+    _exercise_cli_source_binding(
+        tmp_path, monkeypatch, task=task, autopilot=True, user_messages=messages,
+    )
+    assert len(messages) == 2
+    assert messages[0].endswith(task)
+    assert '[Deliverable language:' not in messages[0]
+    assert '[Deliverable language:' not in messages[1]
 
 
 def test_cli_interactive_source_accumulates_and_clear_starts_fresh(tmp_path, monkeypatch):

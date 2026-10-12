@@ -206,6 +206,7 @@ from box_agent.acp.follow_up_suggestions import (
     parse_follow_up_suggestions_response,
 )
 from box_agent.llm.lightweight import LightweightPromptError, run_lightweight_prompt
+from box_agent.turn_language import deliverable_language_hint
 from box_agent.project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT,
     append_prompt_segment,
@@ -2477,6 +2478,8 @@ class BoxACPAgent:
         state.follow_up_suggestions_task = None
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        # Judge the language on the user's own words, before host prefixes are added.
+        language_hint = deliverable_language_hint(user_text)
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         source_binding_text = (
             _user_source_text_for_binding(user_text)
@@ -2535,6 +2538,8 @@ class BoxACPAgent:
                 "explicitly requests another language.]\n\n"
                 f"{user_text}"
             )
+        if language_hint and not state.utility_session:
+            user_text = f"{user_text.rstrip()}\n\n{language_hint}"
         if not state.utility_session:
             connector_status = _connector_status_context(
                 state.selected_connector_ids,

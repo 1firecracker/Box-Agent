@@ -572,3 +572,14 @@ logger.debug(f"Tool call: {tool_call.name}")
 logger.debug(f"Tool arguments: {tool_call.arguments}")
 logger.debug(f"Tool result: {result.content[:200]}")
 ```
+
+Deliverable files follow the current request's language unless the user explicitly
+chooses another language; reference material does not override that choice.
+Conversational replies and progress follow the host UI language (ACP `ui_language`).
+CLI, Python SDK and ACP share the turn-hint generator. Only sufficiently clear
+English requests trigger the extra reminder. Other languages and mixed-language
+requests rely on the system language contract; reference text does not cause a
+Japanese-language override.
+Utility sessions and automatic continuations do not receive these hints.
+Hosts passing a generated continuation as `RunRequest.user_message` must mark it
+with `metadata={"synthetic_continuation": True}`; ordinary SDK requests remain unmarked.
