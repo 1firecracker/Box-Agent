@@ -1310,6 +1310,8 @@ Examples:
         help="Open the offline developer viewer for session trace JSONL files",
     )
 
+    subparsers.add_parser("install-cua", help="Install the shared CuaDriver runtime for desktop control")
+
     # install-node subcommand
     node_parser = subparsers.add_parser(
         "install-node",
@@ -2873,6 +2875,20 @@ def main() -> int:
     # Handle install-node subcommand
     if args.command == "install-node":
         cmd_install_node(version=args.version)
+        return 0
+
+    if args.command == "install-cua":
+        from box_agent.tools.cua_install import install_cua
+        try:
+            print("Preparing CuaDriver (reuse verified installation or download)...", flush=True)
+            driver = install_cua()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"CUA installation failed: {error}")
+            return 1
+        print(f"CuaDriver ready: {driver}")
+        if sys.platform == "darwin":
+            print(f'Grant system permissions before use: "{driver}" permissions grant')
+        print("Restart Box-Agent to discover the installed driver.")
         return 0
 
     workspace_dir = _workspace_from_args(args)

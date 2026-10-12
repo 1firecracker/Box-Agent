@@ -1170,7 +1170,12 @@ class MCPTool(Tool):
                 arguments=call_arguments, structured_content=structured_content,
             )
             if context:
-                content_str = "\n".join([content_str, context]).strip()
+                if is_error or structured_error:
+                    context = (
+                        "Failed tool observation: use this state only for diagnosis; "
+                        "refresh the target state before further actions.\n" + context
+                    )
+                content_str = "\n".join([context, content_str]).strip()
             result_adapters = (
                 allowed_mcp_result_adapters(
                     server_name=self._server_name, remote_name=self._remote_name,
@@ -2171,6 +2176,20 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
     )
 
 
+_cua_service = None  # Owned with the existing process-wide MCP registry; closed below.
+
+
+def register_cua_service(service):
+    global _cua_service
+    if _cua_service is not None and _cua_service is not service:
+        if _cua_service.settings == service.settings:
+            service.adapter.cleanup()
+            return _cua_service
+        raise RuntimeError("CUA runtime is already registered")
+    _cua_service = service
+    return service
+
+
 def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer]:
     global _mcp_sources
     _mcp_sources = configured_mcp_sources(config_path)
@@ -2206,7 +2225,24 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
     )
     for conflict in resolved.conflicts:
         _warn(f"Skipping conflicting MCP server: {conflict}")
-    return resolved.servers
+    servers = dict(resolved.servers)
+    if _cua_service is not None:
+        name = _cua_service.name
+        config = _cua_service.server_config
+        existing = servers.get(name)
+        if existing and existing.config.get("disabled"):
+            return servers  # Explicit disable always wins, including host mode.
+        if existing and existing.config != config:
+            _warn(f"Managed CUA server '{name}' conflicts with existing MCP configuration; remove the old CUA entry before retrying")
+            from dataclasses import replace
+            servers[name] = replace(existing, config={**existing.config, "disabled": True})
+            return servers  # A CUA conflict must not block unrelated MCP servers.
+        servers[name] = ResolvedMcpServer(
+            name=name, config=config, owner="system", config_id=name,
+            connector_id=None, connector_name=None, source_path="<runtime:cua>",
+            fingerprint=json.dumps(config, sort_keys=True),
+        )
+    return servers
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:
@@ -2326,6 +2362,10 @@ async def load_mcp_tools_async(
                 )
                 continue
 
+            if _cua_service is not None and server_name == _cua_service.name:
+                _record_status(server_name, "connecting", error="Call ensure_cua_ready to prepare CUA", definition=definition)
+                continue
+
             conn_type = _effective_connection_type(server_name, server_config)
             url = server_config.get("url")
             command = server_config.get("command")
@@ -2399,9 +2439,14 @@ async def load_mcp_tools_async(
 
 async def cleanup_mcp_connections():
     """Clean up all MCP connections."""
-    global _mcp_connections, _mcp_server_definitions, _mcp_sources
-    for connection in _mcp_connections:
-        await connection.disconnect()
+    global _mcp_connections, _mcp_server_definitions, _mcp_sources, _cua_service
+    try:
+        for connection in _mcp_connections:
+            await connection.disconnect()
+    finally:
+        if _cua_service is not None:
+            await _cua_service.close()
+            _cua_service = None
     _mcp_connections.clear()
     _mcp_reconnect_locks.clear()
     _mcp_server_definitions = {}
@@ -2643,6 +2688,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
     if server_config.get("disabled"):
         _record_status(name, "disabled", definition=definition)
         return {"success": False, "error": "Server is disabled", "configPath": definition.source_path}
+
+    if _cua_service is not None and name == _cua_service.name:
+        try:
+            await _cua_service.prepare()
+        except (OSError, RuntimeError) as error:
+            _record_status(name, "failed", error=str(error), definition=definition)
+            return {"success": False, "error": str(error)}
 
     catalog = get_mcp_tool_catalog()
     catalog.mark_server_loading(name)

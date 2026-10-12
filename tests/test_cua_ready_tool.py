@@ -1,0 +1,107 @@
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from box_agent.plugins.cua.ready_tool import CuaService, EnsureCuaReadyTool, create_cua_service
+from box_agent.plugins.cua.config import CuaConfig, CuaRuntimeConfig
+from box_agent.tools import mcp_loader as loader
+
+
+@pytest.mark.asyncio
+async def test_external_readiness_never_launches_or_stops_host(monkeypatch):
+    service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(
+        enabled=True, mode="external", driver_path="/trusted/driver", endpoint="/host/socket")))
+    service.manager._probe = AsyncMock(return_value=False)
+    service.manager._start = AsyncMock()
+    with pytest.raises(RuntimeError, match="Host CUA daemon"):
+        await service.prepare()
+    await service.close()
+    service.manager._start.assert_not_awaited()
+
+
+def test_host_environment_selects_external_and_enables_plugin(monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", json.dumps({
+        "enabled": True, "mode": "external", "endpoint": "/host/socket", "driver_path": "/trusted/driver"}))
+    config = SimpleNamespace(plugins={})
+    service = create_cua_service(config)
+    assert service.config.mode == "external"
+    assert service.server_config["args"] == ["mcp", "--socket", "/host/socket", "--embedded"]
+    assert config.plugins["cua"]["runtime"]["enabled"]
+
+
+def test_readiness_tool_does_not_accept_model_selected_launch_configuration():
+    assert EnsureCuaReadyTool(None).parameters["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_service_retains_pending_launch_and_directory_until_cleanup_retry_succeeds():
+    from pathlib import Path
+    service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
+    directory = Path(service.adapter.directory.name)
+    pending = SimpleNamespace(close=AsyncMock(side_effect=[RuntimeError("launch unsettled"), None]))
+    service.adapter._pending_handle = pending
+    with pytest.raises(RuntimeError, match="launch unsettled"):
+        await service.close()
+    assert service.adapter._pending_handle is pending
+    assert directory.exists()
+    await service.close()
+    assert service.adapter._pending_handle is None
+    assert not directory.exists()
+
+
+def test_explicit_plugin_disable_wins_over_host_environment(monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", json.dumps({
+        "enabled": True, "mode": "external", "endpoint": "/host/socket"}))
+    config = SimpleNamespace(plugins={"cua": {"runtime": {"enabled": False}}})
+    service = create_cua_service(config)
+    assert not service.config.enabled
+    assert service.config.mode == "external"
+
+
+@pytest.mark.asyncio
+async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, monkeypatch):
+    file = tmp_path / "mcp.json"
+    file.write_text(json.dumps({"mcpServers": {
+        "computer-use": {"command": "legacy-cua"}, "other": {"command": "other-mcp"}}}))
+    service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
+    monkeypatch.setattr(loader, "_cua_service", service)
+    try:
+        definitions = loader._resolve_registered_sources(str(file))
+        assert definitions["computer-use"].config["disabled"]
+        assert definitions["other"].config["command"] == "other-mcp"
+    finally:
+        await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_managed_cua_is_lazy_and_disabled_config_wins(tmp_path, monkeypatch):
+    file = tmp_path / "mcp.json"
+    file.write_text(json.dumps({"mcpServers": {"computer-use": {"disabled": True}}}))
+    service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
+    monkeypatch.setattr(loader, "_cua_service", service)
+    service.prepare = AsyncMock()
+    try:
+        tools = await loader.load_mcp_tools_async(str(file))
+        assert tools == []
+        result = await loader.reconnect_mcp_server(service.name)
+        assert not result["success"] and result["error"] == "Server is disabled"
+        service.prepare.assert_not_awaited()
+    finally:
+        await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_cold_load_publishes_cua_without_starting_daemon(tmp_path, monkeypatch):
+    file = tmp_path / "mcp.json"
+    file.write_text('{"mcpServers":{}}')
+    service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
+    service.prepare = AsyncMock()
+    monkeypatch.setattr(loader, "_cua_service", service)
+    try:
+        assert await loader.load_mcp_tools_async(str(file)) == []
+        assert service.name in loader._mcp_server_definitions
+        service.prepare.assert_not_awaited()
+    finally:
+        await loader.cleanup_mcp_connections()

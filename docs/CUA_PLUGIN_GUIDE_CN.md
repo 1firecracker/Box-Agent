@@ -2,174 +2,55 @@
 
 本文说明如何在 macOS 13+ Apple Silicon 上让 Box-Agent 通过 CuaDriver 的 MCP 服务使用桌面操作，并让支持图片输入的模型看到 CUA 截图。
 
-本指南的适配基线是 **CuaDriver 0.32.0**，采用独立 `CuaDriver.app` 加 stdio MCP 的接入方式。工具及参数由 Box-Agent 从运行中的 Driver schema 读取；这里只固定安装版本和连接配置。
+## 当前分支：CLI 安装与双宿主模式
 
-安装完成后的配置应对应以下关系：
+独立 CLI 使用 `box-agent install-cua` 下载并安装固定的 CuaDriver 0.28.2，不需要 sudo 或模型 API 配置。安装成功会打印驱动绝对路径；macOS 按输出提示执行 `"<驱动绝对路径>" permissions grant`，完成授权后重新启动 `box-agent`。
 
-| 项目 | 本指南使用的值 |
-| --- | --- |
-| Driver 版本 | `0.32.0` |
-| MCP command | `/Applications/CuaDriver.app/Contents/MacOS/cua-driver` |
-| MCP args | `["mcp"]` |
-| MCP 服务名 / 插件 `server_name` | `cua-computer-use` |
-| 模型图片能力 | 支持图片的模型显式设置 `image_input: true` |
-| 插件截图输入 / 保存 | `feed_screenshots: true` / `persist_images: true` |
+安装命令支持 macOS arm64/x64、Windows arm64/x64、Linux arm64/x64；Windows/Linux 的真实桌面操作仍需实机验收。
 
-## 1. 运行前提
-
-CUA 插件只负责 Box-Agent 内的 MCP 结果适配、图片注入和 sidecar 保存。它不包含 `cua-driver` 二进制，也不会替操作系统授予辅助功能或屏幕录制权限。
-
-需要先准备以下运行时：
-
-1. macOS 上已安装并能运行 `cua-driver`。
-2. CuaDriver.app 已获得辅助功能和屏幕录制权限。
-3. Box-Agent 的 MCP 配置能启动 CuaDriver 的 MCP 子命令。
-
-已安装的用户先检查 App 内二进制版本；返回 `cua-driver 0.32.0` 时，可跳到权限检查和 MCP 配置，不需要重装：
+下载源使用 `RACCOON_CUA_DOWNLOAD_BASE_URL`：未设置时用官方 GitHub Releases；设置时仅使用该 HTTPS CDN，不在失败后回退官方。CDN 必须镜像官方原始压缩包，安装器使用内置 SHA-256 校验；拒绝归档路径逃逸、链接和特殊文件，macOS 还检查签名与 Gatekeeper。
 
 ```bash
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver --version
+box-agent install-cua
+# 可选 CDN，文件布局与桌面端一致：
+RACCOON_CUA_DOWNLOAD_BASE_URL=https://cdn.example.com/computer-use/ box-agent install-cua
 ```
 
-下面的安装脚本下载并校验 [CuaDriver 0.32.0 官方发布包](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.32.0)，安装 CLI 和 `CuaDriver.app`。归档 SHA-256 为 `31f278f38015616a02142ccbb396721897cee4892927db103a31b297f60035a9`，与官方 release asset digest 一致。Box-Agent Python 包不包含这个 macOS 原生驱动。已有不同版本的 App 时，脚本会停止；升级步骤见下文。
+驱动资源默认存放于同一用户的 `~/.box-agent/resources/cua-driver/`，桌面客户端与 CLI 共用 `current.json` 安装记录。该目录从系统用户 home 解析，不跟随 `BOX_AGENT_HOME` 或客户端的隔离 profile。同版本已验证资源直接复用，无需分别下载；两边同时安装时可能各自下载，但以独立目录和原子记录发布避免覆盖运行中的二进制。可信环境可设置绝对路径 `RACCOON_CUA_RESOURCE_DIR`；要共享资源，两边必须使用同一目录。不会修改 PATH 或 `/Applications`，二进制不进入源码或 Python 安装包。
 
-```bash
-cat > /tmp/install-cua-driver.sh <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
+共享的只是驱动文件，不是授权或 daemon：CLI 的 `ensure_cua_ready` 管理独立 daemon；桌面客户端以 external 模式提供自己持有的 embedded daemon。关闭一方不会停止另一方。下载不自动开启能力、不授予权限、不启动 daemon。
 
-[[ "$(/usr/bin/uname -s)" == "Darwin" && "$(/usr/bin/uname -m)" == "arm64" ]] || {
-  echo "This installer requires Apple Silicon macOS." >&2
-  exit 2
-}
-[[ "$(/usr/bin/id -u)" == "0" ]] || {
-  echo "Run with: sudo bash /tmp/install-cua-driver.sh" >&2
-  exit 2
-}
+已有安装版本或签名校验失败时，`install-cua` 会重新下载到独立目录；新驱动通过验证后才切换安装记录，下载失败保留旧记录及文件。macOS CLI 的 LaunchServices 启动取消会清理尚未监听的自持进程；清理无法确认时保留待启动句柄和私有目录，供关闭时重试，不按应用名称停止其他进程。
 
-version="0.32.0"
-url="https://github.com/trycua/cua/releases/download/cua-driver-rs-v${version}/cua-driver-rs-${version}-darwin-arm64.tar.gz"
-sha256="31f278f38015616a02142ccbb396721897cee4892927db103a31b297f60035a9"
-prefix="/usr/local/lib/cua-driver-${version}"
-cache="/usr/local/lib/cua-driver-downloads"
-archive="${cache}/cua-driver-rs-${version}-darwin-arm64.tar.gz"
+## 生命周期与 MCP 配置
 
-/bin/mkdir -p "${cache}" /usr/local/bin
-if [[ ! -f "${archive}" ]]; then
-  /usr/bin/curl --fail --location --retry 5 --output "${archive}.partial" "${url}"
-  /bin/mv "${archive}.partial" "${archive}"
-fi
-printf '%s  %s\n' "${sha256}" "${archive}" | /usr/bin/shasum -a 256 -c -
+CLI 无需手写 CUA 的 `mcp.json`。启用 MCP 工具时，Box-Agent 默认注册 CUA 专用管理模块；模型先读取 computer-use Skill，再调用 `ensure_cua_ready`。该工具检查已安装驱动、按需启动独立 daemon，并连接私有 endpoint 上的 MCP 代理。未安装驱动时返回明确错误，不自动下载或授权。
 
-if [[ ! -f "${prefix}/.installed" ]]; then
-  /bin/mkdir -p "${prefix}"
-  /usr/bin/tar -xzf "${archive}" -C "${prefix}" --strip-components 1
-  [[ -x "${prefix}/cua-driver" && -d "${prefix}/CuaDriver.app" ]] || {
-    echo "Unexpected CuaDriver package layout." >&2
-    exit 5
-  }
-  /usr/bin/codesign --verify --deep --strict "${prefix}/CuaDriver.app"
-  /usr/bin/touch "${prefix}/.installed"
-fi
+桌面客户端负责驱动安装、当前客户端的系统权限和 embedded daemon。宿主通过可信环境变量 `BOX_AGENT_CUA_RUNTIME_CONFIG` 提供 external 模式、驱动绝对路径和私有 endpoint；Box-Agent 只检查并连接，不自行启动备用 daemon。必须由 Electron 自持的原因是 macOS 的权限归属、客户端开关和退出清理都由桌面宿主负责，而 CLI 使用独立 App 身份。
 
-if [[ -d /Applications/CuaDriver.app ]]; then
-  current=$(/usr/bin/shasum -a 256 /Applications/CuaDriver.app/Contents/MacOS/cua-driver | /usr/bin/cut -d ' ' -f 1)
-  expected=$(/usr/bin/shasum -a 256 "${prefix}/CuaDriver.app/Contents/MacOS/cua-driver" | /usr/bin/cut -d ' ' -f 1)
-  [[ "${current}" == "${expected}" ]] || {
-    echo "An existing CuaDriver.app has a different binary; stop and back it up before rerunning (see the upgrade steps)." >&2
-    exit 6
-  }
-else
-  /usr/bin/ditto "${prefix}/CuaDriver.app" /Applications/CuaDriver.app
-fi
-/usr/bin/codesign --verify --deep --strict /Applications/CuaDriver.app
-/bin/ln -sfn "${prefix}/cua-driver" /usr/local/bin/cua-driver
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver --version
-/usr/local/bin/cua-driver --version
-echo "Installed CuaDriver ${version}. Grant Accessibility and Screen Recording permissions, then start CuaDriver.app."
-SH
-sudo bash /tmp/install-cua-driver.sh
-```
+托管 MCP 默认服务名为 `computer-use`。不要再添加同名手工配置（例如 `args: ["mcp"]`）：与托管定义不一致会禁用该 CUA 服务并报告冲突，其他 MCP 不受影响。已有同名 `disabled: true` 配置优先生效。
 
-### 从旧版升级
-
-先结束桌面操作任务并退出使用该 Driver 的 Box-Agent CLI / ACP 宿主，再停止旧 Driver、备份 App。以下命令保留旧 App，随后重新运行上面的安装脚本：
-
-```bash
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver stop
-task_cua_backup="/Applications/CuaDriver.app.backup-$(date +%Y%m%d-%H%M%S)"
-sudo mv /Applications/CuaDriver.app "${task_cua_backup}"
-sudo bash /tmp/install-cua-driver.sh
-```
-
-升级后重新检查权限，并重启 Box-Agent 或承载 ACP 的应用。只替换磁盘文件不会让已经运行的 MCP / ACP 进程加载新版本。
-
-### 权限与启动检查
-
-以当前登录的桌面用户执行权限引导和状态检查，不要使用 `sudo`：
-
-```bash
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver permissions grant
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver permissions status --json
-```
-
-`permissions grant` 通过 LaunchServices 启动 App 并引导授权；按系统提示允许辅助功能和屏幕录制。`permissions status` 是只读检查，需确认 `accessibility` 和 `screen_recording` 为 `true`，且 `source` 指向 Driver daemon 的 `com.trycua.driver` 身份。没有运行中的 daemon 时可能返回 `unknown`；权限布尔值也不能代替真实截图验收。
-
-需要手动启动驱动时，使用 App 身份启动：
-
-```bash
-open -g -a /Applications/CuaDriver.app --args serve
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver status
-```
-
-配置下文的 MCP server 后，`mcp` 代理也可以自动拉起独立 App。本指南不添加 `--direct` 或 `--embedded`：这些模式改变运行时和 macOS 权限归属，不能作为此安装方式的直接替代。`/usr/local/bin/cua-driver` 是安装脚本提供的可选 CLI 链接；MCP 示例直接使用 App 内绝对路径，不依赖 PATH。
-
-## 2. 配置 CuaDriver MCP 服务
-
-Box-Agent 默认读取 `~/.box-agent/config/mcp.json` 和 `~/.box-agent/config/config.yaml`。开发目录中的模型配置可能优先，ACP 宿主也可能指定其他配置来源；可以用 `box-agent config --json` 查看 CLI 实际读取的模型配置路径。在已有 `mcpServers` 下合并以下 stdio server，保留其他服务；`cua-computer-use` 是服务名，后面插件配置中的 `server_name` 必须与它一致：
-
-```json
-{
-  "mcpServers": {
-    "cua-computer-use": {
-      "description": "Local CuaDriver computer-use MCP",
-      "type": "stdio",
-      "command": "/Applications/CuaDriver.app/Contents/MacOS/cua-driver",
-      "args": ["mcp"],
-      "alwaysLoad": true,
-      "disabled": false,
-      "connect_timeout": 60,
-      "execute_timeout": 120
-    }
-  }
-}
-```
-
-如果驱动安装在其他位置，只替换 `command`，不要把 `cua-driver` 的路径写进 `config.yaml`。`mcp.json` 中的 `disabled` 必须为 `false`；修改后重新启动 Box-Agent，让既有 MCP loader 建立连接。
-
-## 3. 开启 Box-Agent CUA 插件
-
-在 Box-Agent 的 `~/.box-agent/config/config.yaml` 中加入：
+可在现有 `config.yaml` 的 `plugins` 下合并以下可选配置，保留其他插件：
 
 ```yaml
 plugins:
   cua:
-    server_name: "cua-computer-use"
+    server_name: computer-use
     feed_screenshots: true
     persist_images: true
+    runtime:
+      enabled: true
+      mode: standalone
 ```
 
-把上述片段合并进现有 `plugins`，保留其他插件。这里的 `server_name` 必须匹配 `mcp.json` 的键名。如果已有服务名是 `cua` 或 `computer-use`，可以保留原名并让两处一致，不要为同一 Driver 重复创建服务。插件默认服务名为 `computer-use`，所以使用本指南的名字时必须显式填写。插件启动后会自动激活这个 server 已发现的工具，不需要模型先调用 `tool_search`；连接和重连仍由 Box-Agent 原有 MCP loader 管理。
+- 不填写 `plugins.cua` 时也会注册默认管理模块；缺少驱动仍不会启动 daemon。
+- CLI 可设置 `runtime.enabled: false` 禁用 CUA；桌面端使用客户端开关，不手动设置 external endpoint。
+- `feed_screenshots: false` 保留工具文本和结构化状态，但不向模型注入截图；`BOX_AGENT_CUA_VISION=false` 可临时关闭图片注入。
+- `persist_images: true` 让有 SessionLog 的会话保存截图 sidecar，独立于模型图片能力；设为 `false` 关闭图片落盘。
+- 报错结果仍保留结构化诊断信息，但保持失败状态、不注入图片。模型需刷新目标状态后再操作，不能把失败观察当成有效操作依据。
+- 退出 CLI 清理自己启动的 daemon；external 模式不停止宿主 daemon。两种模式都不会停止其他应用的进程。
 
-CUA 插件是显式可选的：
-
-- 没有 `plugins.cua` 命名空间时，插件不会激活。
-- `feed_screenshots: false` 时保留工具文本和结构化状态，不注入截图。
-- `persist_images: true` 时，有 SessionLog 的会话会把截图保存为图片 sidecar；该开关独立于视觉输入和模型能力。设为 `false` 可关闭插件图片落盘。
-- 设置 `BOX_AGENT_CUA_VISION=false` 可以临时关闭图片注入，不改配置文件。
-- 关闭插件不会卸载或停止已经安装的 CuaDriver；要停止 MCP 服务，应把 `mcp.json` 中对应 entry 设为 `disabled: true` 或移除它。
-
-## 4. 模型识别和图片注入
+## 模型识别和图片注入
 
 插件不会仅因为模型名称看起来像视觉模型就无条件发送图片。它按以下顺序读取模型的图片输入能力：
 
@@ -245,11 +126,9 @@ TokenHub 当前的模型目录可能只返回模型 ID 和 endpoint 类型，不
 
 ### 最小端到端验收
 
-重启 Box-Agent 后先检查 Driver 版本、权限及模型配置：
+CLI 按 `install-cua` 输出的驱动路径检查权限；桌面端通过插件卡片检查当前客户端权限。重启 Box-Agent 后检查模型配置：
 
 ```bash
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver --version
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver permissions status --json
 box-agent config --json | jq '{config_file, model: .llm.model, image_input: .llm.image_input}'
 box-agent doctor
 ```
@@ -264,7 +143,7 @@ box-agent doctor
 
 若只看到工具文本而没有图片，先检查 `image_input`、`server_name` 和 MCP 权限。
 
-### 0.32.0 观察与动作约定
+### 观察与动作约定
 
 Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据说明：
 
@@ -274,7 +153,7 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 - 像素动作消费 capture ID，后续动作取得新观察。`effect: unverifiable` 或派发成功后仍需观察结果。
 - `window_id_not_found` 时重新枚举窗口；`window_owner_pid_mismatch` 时按返回的真实 owner PID 核对目标，尤其是打开/保存面板。
 
-## 5. 图片保存和请求行为
+## 图片保存和请求行为
 
 一次 CUA 工具调用返回图片后，保存和模型输入独立控制：
 
@@ -284,11 +163,11 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 
 已成功保存到 sidecar 的图片不再把 base64 写入工具结果；SessionLog 保留图片路径、哈希和尺寸。未成功保存的图片保留原有 MCP raw output，避免丢失数据。`~/.box-agent/log/sessions/` 下的文件是诊断 SessionTrace，主要记录 LLM/tool 请求；要检查工具结果路径，应查看对应的 `~/.box-agent/sessions/<session>/session.jsonl`。
 
-## 6. 常见问题
+## 常见问题
 
 ### MCP 工具没有出现
 
-检查 `tools.enable_mcp` 是否开启、`mcp.json` 的 `disabled` 是否为 `false`、`command` 是否可执行，并确认 `server_name` 与插件配置一致。
+检查 `tools.enable_mcp` 和 `plugins.cua.runtime.enabled` 是否开启、驱动是否已安装，再调用 `ensure_cua_ready`，之后用 `tool_search` 发现动作工具。桌面端还需开启插件并完成授权；external 模式必须有可用的宿主 daemon。若报告同名 MCP 配置冲突，移除旧手工 CUA entry；显式禁用的 entry 则需先解除禁用。
 
 ### 工具成功但模型没有看到截图
 
@@ -302,7 +181,7 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 
 ### 升级后仍连接旧版本
 
-检查 `mcp.json` 的 `command` 指向哪个二进制，再对该绝对路径执行 `--version`。同时确认旧 daemon 已停止、Box-Agent / ACP 宿主已重启；终端 PATH 中另一个 `cua-driver` 的版本不能证明 MCP 使用的版本。源码改动也不会自动进入已打包的 ACP runtime，需重新构建、安装并重启消费它的宿主后验收。
+检查共享目录 `current.json` 所指向的安装，以及是否设置了覆盖路径的环境变量或 `runtime.driver_path`；对实际驱动路径执行 `--version`。结束旧任务并重启 CLI / 桌面宿主，不能只替换文件。终端 PATH 中另一个 `cua-driver` 的版本不能证明 MCP 使用的版本。源码改动也不会自动进入已打包的 ACP runtime，需重新构建、安装并重启消费它的宿主后验收。
 
 ### 普通模型收到了图片错误
 
@@ -310,8 +189,4 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 
 ### 如何完全关闭 CUA
 
-执行以下任一项即可停止图片注入：移除 `plugins.cua`，设置 `feed_screenshots: false`，或设置 `BOX_AGENT_CUA_VISION=false`。如果还要停止 CuaDriver MCP 连接，将 `mcp.json` 中的 `cua-computer-use` entry 禁用并重启 Box-Agent。这个操作不会保证独立的 CuaDriver app daemon 退出；要完全停止驱动，再执行：
-
-```bash
-/Applications/CuaDriver.app/Contents/MacOS/cua-driver stop
-```
+仅关闭图片输入可设置 `feed_screenshots: false` 或 `BOX_AGENT_CUA_VISION=false`。完全停用时，CLI 设置 `plugins.cua.runtime.enabled: false` 并退出当前进程、重新启动；桌面端关闭「桌面控制」开关。生命周期 owner 会清理自己启动的 daemon，不停止其他应用的实例。移除 `plugins.cua` 不会禁用默认管理模块。
