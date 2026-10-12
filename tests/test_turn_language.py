@@ -77,3 +77,17 @@ def test_other_latin_script_languages_are_not_forced_to_english(text):
 
 def test_common_english_question_is_recognized():
     assert request_language('Can you check whether this API key looks valid? It should use the documented format.') == 'English'
+
+
+@pytest.mark.parametrize('phrase', ['こんにちは', '"こんにちは"', '"' + 'こんにちは' * 20 + '"'])
+def test_english_request_referencing_japanese_does_not_gain_a_japanese_hint(phrase):
+    text = f'Write a short note about the phrase {phrase} for the board and save it as greeting.md.'
+    assert request_language(text) is None
+    assert with_deliverable_language_hint(text) == text
+
+
+@pytest.mark.parametrize('phrase', ['こんにちは', '"こんにちは"'])
+def test_chinese_request_referencing_japanese_does_not_gain_a_japanese_hint(phrase):
+    text = f'请解释一下{phrase}这句话是什么意思。'
+    assert request_language(text) is None
+    assert with_deliverable_language_hint(text) == text

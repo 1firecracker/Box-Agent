@@ -48,10 +48,11 @@ def request_language(text: str) -> str | None:
     kana = sum(1 for char in content if "぀" <= char <= "ヿ")
     han = sum(1 for char in content if "一" <= char <= "鿿")
     latin = sum(1 for char in content if char.isascii() and char.isalpha())
-    if kana >= 5 and kana >= han * 0.3:
-        return "Japanese"
     words = set(re.findall(r"\b[a-z]+\b", content.lower()))
-    if (latin >= _MIN_LETTERS and len(words & _ENGLISH_CUES) >= 3
+    clear_english = latin >= _MIN_LETTERS and len(words & _ENGLISH_CUES) >= 3
+    if kana >= 5 and kana >= han and kana + han >= latin and not clear_english:
+        return "Japanese"
+    if (clear_english
             and not any(char.isalpha() and not char.isascii() for char in content)
             and (han + kana) / (latin + han + kana) < _MAX_CJK_SHARE):
         return "English"
