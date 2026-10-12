@@ -76,7 +76,7 @@ def credential_notice(text: str) -> str | None:
     if not values:
         return None
     passwords = {value for _, value in _password_values(text)}
-    masked = "、".join(f"`{mask_credential(value, password=any(value in password for password in passwords))}`" for value in values)
+    masked = "、".join(f"`{mask_credential(value, password=any(value in password or password in value for password in passwords))}`" for value in values)
     return (
         f"[敏感信息：本条消息含疑似凭据（{masked}）。以上仅为脱敏示例；"
         "回复、写入的文件和执行的命令中都不要出现任何凭据的完整值："

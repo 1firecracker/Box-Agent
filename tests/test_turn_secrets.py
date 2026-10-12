@@ -137,3 +137,17 @@ def test_many_credentials_produce_a_bounded_notice_without_truncating_the_reques
     assert with_turn_hints(text).startswith(text)
     if password_later:
         assert TOKEN[:8] not in notice and TOKEN[-4:] not in notice
+
+
+@pytest.mark.parametrize('password_first', [False, True])
+@pytest.mark.parametrize('password_length', [8, 12])
+def test_token_containing_a_separate_password_is_fully_masked(password_length, password_first):
+    key = 'sk-live-' + 'a' * 32
+    password = key[:password_length]
+    other_tokens = ['sk-fixture' + format(i, '08d') + 'x' * 16 for i in range(1000)]
+    lines = [key, *other_tokens]
+    lines.insert(0 if password_first else len(lines), f'password: "{password}"')
+    text = '\n'.join(lines)
+    notice = credential_notice(text)
+    assert key[:8] not in notice and key[-4:] not in notice
+    assert '`****`' in notice

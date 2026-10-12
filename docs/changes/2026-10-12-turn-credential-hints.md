@@ -11,6 +11,8 @@ identified with a shortened form. The notice asks the model to avoid full values
 in replies, files and commands and use environment-backed configuration instead.
 At most eight masked examples are shown to keep large inputs from expanding the
 reminder; the instruction still applies to every credential in the message.
+A token containing a separately supplied password (or contained in one) is also
+fully masked, including when that password appears after the example limit.
 Language and credential reminders are combined once. SDK/CLI routing still sees
 raw user input. ACP derives reminders before adding host prefixes; its existing
 message-preparation path owns appending them. Explicit utility sessions and
