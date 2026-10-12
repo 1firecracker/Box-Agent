@@ -579,3 +579,5 @@ Conversational replies and progress follow the host UI language (ACP `ui_languag
 CLI, Python SDK and ACP share the turn-hint generator. Only sufficiently clear English
 or Japanese requests trigger it; uncertain languages are not forced to English.
 Utility sessions and automatic continuations do not receive these hints.
+Hosts passing a generated continuation as `RunRequest.user_message` must mark it
+with `metadata={"synthetic_continuation": True}`; ordinary SDK requests remain unmarked.

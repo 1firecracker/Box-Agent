@@ -1908,8 +1908,10 @@ async def _run_session_turn(session: AgentSession, **overrides: Any) -> str:
     session_id = overrides.pop("session_id")
     run_id = f"run-{uuid4().hex}"
     turn_id = overrides.pop("turn_id", run_id)
+    synthetic_continuation = overrides.pop("synthetic_continuation", False)
     handle = await AgentService().start(
-        RunRequest(run_id, session_id, user_message),
+        RunRequest(run_id, session_id, user_message,
+                   metadata={"synthetic_continuation": True} if synthetic_continuation else {}),
         session=session,
         options=session.build_run_options(
             session_id=session_id, turn_id=turn_id, **overrides,
@@ -2375,6 +2377,7 @@ async def run_agent(
                                     agent_session, user_message=continuation,
                                     session_id=logical_session_id,
                                     turn_id=traced_turn.turn_id,
+                                    synthetic_continuation=True,
                                 )
                                 after_signature = goal_autopilot_progress_signature(agent.goal)
                                 if should_continue_goal_autopilot(agent, agent.last_stop_reason):

@@ -116,7 +116,9 @@ class AgentService:
         if request.user_message is not None:
             from .turn_language import with_deliverable_language_hint
 
-            message = (request.user_message if getattr(session, "utility_session", False)
+            skip_hint = (getattr(session, "utility_session", False)
+                         or request.metadata.get("synthetic_continuation") is True)
+            message = (request.user_message if skip_hint
                        else with_deliverable_language_hint(request.user_message))
             if validation is not None:
                 with runtime.reference_scope(validation):

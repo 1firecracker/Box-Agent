@@ -67,6 +67,8 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
     'Bitte schreibe eine kurze Produktbeschreibung und speichere sie in blurb.md.',
     'Rédige une courte description du produit dans blurb.md pour notre équipe.',
     'Escreva uma descrição breve do produto e salve em blurb.md.',
+    'On a besoin de ton avis, tu as carte blanche pour ce document.',
+    'On a besoin de ton aide, tu as une minute pour faire ce document ?',
 ])
 def test_other_latin_script_languages_are_not_forced_to_english(text):
     assert request_language(text) is None

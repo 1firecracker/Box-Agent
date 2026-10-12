@@ -278,3 +278,13 @@ async def test_sdk_adds_language_hint_without_changing_request_or_routing(utilit
     await AgentClient(session).run(request)
     assert request.user_message == session.routing_text == text
     assert ('[Deliverable language: English.' in session.agent.messages[0]) is (not utility)
+
+
+@pytest.mark.asyncio
+async def test_sdk_synthetic_continuation_preserves_message_without_language_hint():
+    session = _Session()
+    text = 'Please continue this task and save the completed report in the workspace.'
+    await AgentClient(session).run(RunRequest(
+        'continuation-run', 'hint-session', text, metadata={'synthetic_continuation': True},
+    ))
+    assert session.agent.messages == [text]

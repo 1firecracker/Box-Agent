@@ -1,4 +1,4 @@
-"""Per-turn deliverable-language hint shared by the CLI and ACP adapters.
+"""Per-turn deliverable-language hint shared by service and ACP entry points.
 
 The system prompt says deliverables follow the user's language, but evals
 showed a model writing a Chinese blurb for an English request because the
@@ -19,8 +19,9 @@ import re
 # deliverable and should not gain a hint.
 _MIN_LETTERS = 30
 _MAX_CJK_SHARE = 0.1
-_ENGLISH_CUES = frozenset({"a", "the", "this", "please", "write", "create", "build", "save", "can", "you", "check", "whether", "should", "it",
-                           "based", "on", "and", "as", "for", "from", "with", "into", "summarize"})
+# Exclude ambiguous words such as a/on/as, which are also common in French.
+_ENGLISH_CUES = frozenset({"the", "this", "please", "write", "create", "build", "save", "can", "you", "check", "whether", "should", "it",
+                           "based", "and", "for", "from", "with", "into", "summarize"})
 # Spans that say nothing about the user's language: code, URLs, paths, tags,
 # and slash commands such as "/pptx".
 _NOISE = re.compile(
