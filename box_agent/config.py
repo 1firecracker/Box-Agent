@@ -761,10 +761,11 @@ class Config(BaseModel):
         return Path(__file__).parent
 
     @classmethod
-    def find_config_file(cls, filename: str) -> Path | None:
+    def find_config_file(cls, filename: str, *, prompt_template: str | None = None) -> Path | None:
         path = cls._find_config_file(filename)
-        if path is not None and filename in PROMPT_TEMPLATE_FILES:
-            _warn_prompt_override_drift(path, filename)
+        template = prompt_template or filename
+        if path is not None and template in PROMPT_TEMPLATE_FILES:
+            _warn_prompt_override_drift(path, template)
         return path
 
     @classmethod
@@ -884,8 +885,9 @@ def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
             return None
         expected = set(_PROMPT_PLACEHOLDER.findall(bundled.read_text(encoding="utf-8")))
         actual = set(_PROMPT_PLACEHOLDER.findall(path.read_text(encoding="utf-8")))
-    except OSError:
-        return None
+    except (OSError, UnicodeDecodeError) as error:
+        return {"path": str(path), "bundled": str(bundled), "missing": [], "unknown": [],
+                "error": type(error).__name__}
     missing, unknown = sorted(expected - actual), sorted(actual - expected)
     if not missing and not unknown:
         return None
@@ -905,6 +907,8 @@ def _warn_prompt_override_drift(path: Path, filename: str) -> None:
     if drift is None:
         return
     parts = []
+    if drift.get("error"):
+        parts.append(f"cannot read template: {drift['error']}")
     if drift["missing"]:
         parts.append(f"missing {', '.join(drift['missing'])}")
     if drift["unknown"]:

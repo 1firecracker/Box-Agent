@@ -376,7 +376,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
     if template is None and options.profile == "acp":
         template = "You are a helpful AI assistant."
     elif template is None:
-        path = Config.find_config_file(config.agent.system_prompt_path)
+        path = Config.find_config_file(config.agent.system_prompt_path, prompt_template="system_prompt.md")
         if path and path.exists():
             template = path.read_text(encoding="utf-8")
             status(f"✅ Loaded system prompt (from: {path})")
@@ -384,7 +384,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
             template = "You are Box-Agent, an intelligent assistant that can help users complete various tasks."
             status("⚠️  System prompt not found, using default", success=False)
     if options.profile == "cli" and options.session_mode == "code_agent":
-        code_path = Config.find_config_file(config.agent.code_prompt_path)
+        code_path = Config.find_config_file(config.agent.code_prompt_path, prompt_template="code_prompt.md")
         if code_path and code_path.exists():
             status(f"✅ Loaded code workspace prompt (from: {code_path})")
         else:
@@ -771,7 +771,8 @@ def _compose_session_prompt(
     if attr:
         prompt_filename = getattr(config.agent, attr, None)
         if prompt_filename:
-            mode_path = Config.find_config_file(prompt_filename)
+            template_name = {"analysis_prompt_path": "analysis_prompt.md", "code_prompt_path": "code_prompt.md"}[attr]
+            mode_path = Config.find_config_file(prompt_filename, prompt_template=template_name)
             if mode_path and mode_path.exists():
                 mode_prompt = resolve_capability_placeholders(
                     mode_path.read_text(encoding="utf-8").strip(), available_tools,

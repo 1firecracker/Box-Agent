@@ -78,3 +78,36 @@ def test_doctor_reports_outdated_override(override_home):
     assert status["status"] == "warning"
     assert "analysis_prompt.md" in status["message"]
     assert status["overrides"][0]["missing"]
+
+
+@pytest.mark.parametrize('filename,attr', [
+    ('system_prompt.md', 'system_prompt_path'),
+    ('analysis_prompt.md', 'analysis_prompt_path'),
+    ('code_prompt.md', 'code_prompt_path'),
+])
+@pytest.mark.parametrize('absolute', [False, True])
+def test_configured_template_path_is_checked(override_home, capsys, filename, attr, absolute):
+    from box_agent.config import AgentConfig, LLMConfig, ToolsConfig
+    from box_agent.cli import _doctor_prompt_status
+
+    target = override_home / 'custom.md'
+    target.write_text('stale template', encoding='utf-8')
+    configured = str(target) if absolute else 'custom.md'
+    config = Config(llm=LLMConfig(api_key="test"), tools=ToolsConfig(), agent=AgentConfig(**{attr: configured}))
+    assert Config.find_config_file(configured, prompt_template=filename) == target
+    assert filename in capsys.readouterr().err
+    status = _doctor_prompt_status(config)
+    assert status['status'] == 'warning'
+    assert any(item['path'] == str(target) and item['file'] == filename for item in status['overrides'])
+
+
+def test_invalid_encoding_is_a_structured_doctor_warning(override_home, capsys):
+    from box_agent.cli import _doctor_prompt_status
+
+    target = override_home / 'analysis_prompt.md'
+    target.write_bytes(bytes([255, 254]))
+    assert Config.find_config_file('analysis_prompt.md') == target
+    assert 'UnicodeDecodeError' in capsys.readouterr().err
+    status = _doctor_prompt_status()
+    assert status['status'] == 'warning'
+    assert status['overrides'][0]['error'] == 'UnicodeDecodeError'

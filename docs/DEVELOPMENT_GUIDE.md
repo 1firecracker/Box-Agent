@@ -490,6 +490,15 @@ The system prompt (`system_prompt.md`) defines the Agent's behavior, capabilitie
 
 After modifying `system_prompt.md`, be sure to restart the Agent to apply changes
 
+Keep the version-managed placeholders from the bundled templates when customizing
+`system_prompt.md`, `analysis_prompt.md`, or `code_prompt.md`, including renamed or
+absolute paths configured in `agent.*_prompt_path`. Missing or unknown placeholders
+produce a stderr warning; the override is still used. `box-agent doctor` (including
+`--json`) reports these differences and unreadable or non-UTF-8 templates. Compare
+the reported bundled file with your override and preserve your custom instructions
+while updating placeholders. To use the bundled template, remove a default-name
+override; for custom paths, also restore the corresponding default filename in config.
+
 ## 4. Troubleshooting
 
 ### 4.1 Common Issues
