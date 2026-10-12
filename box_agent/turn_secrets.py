@@ -48,6 +48,8 @@ def detect_credentials(text: str) -> list[str]:
     for pattern in _PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(1) if match.groups() else match.group(0)
+            if _ENV_REFERENCE.fullmatch(value):
+                continue
             start = match.start(1) if match.groups() else match.start()
             found.append((start, value))
     found.extend(_password_values(text))

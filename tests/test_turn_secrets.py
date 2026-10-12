@@ -99,3 +99,10 @@ def test_long_password_does_not_disclose_prefix_or_suffix():
 def test_environment_references_are_not_credentials(reference):
     assert detect_credentials('password: ' + reference) == []
     assert credential_notice('password: ' + reference) is None
+
+
+@pytest.mark.parametrize('reference', ['process.env.API_TOKEN', 'process.env.ACCESS_TOKEN'])
+def test_bearer_environment_references_do_not_trigger_credential_notice(reference):
+    text = f'Authorization: Bearer {reference}'
+    assert detect_credentials(text) == []
+    assert credential_notice(text) is None
