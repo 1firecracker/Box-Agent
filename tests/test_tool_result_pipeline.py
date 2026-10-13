@@ -518,3 +518,29 @@ async def test_incomplete_post_scan_still_publishes_explicit_tool_files(
         "report.txt",
     ]
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_search_citations_match_model_and_events_across_repeated_local_ranks(tmp_path):
+    from box_agent.events import WebSearchEvent
+
+    messages = []
+    tags = []
+    for index, url in enumerate(["https://example.com/one", "https://example.com/two", "https://example.com/one"]):
+        content = json.dumps({"Result": {"WebResults": [{
+            "SortId": 1, "Title": "Source", "Url": url,
+        }]}, "SearchStatus": "ok"})
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"search-{index}", tool_name="web_search",
+            arguments={}, result=ToolResult(success=True, content=content),
+            visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+        ))
+        event = next(event for event in outcome.events if isinstance(event, WebSearchEvent))
+        ref = event.payload["refs"][0]
+        tags.append(ref["reference_tag"])
+        assert ref["url"] == url
+        assert ref["reference_tag"] in outcome.tool_message.content
+        assert "Never invent or renumber" in outcome.tool_message.content
+        assert json.loads(outcome.visible_content)["SearchStatus"] == "ok"
+    assert tags[0] != tags[1]
+    assert tags[0] == tags[2]
+    assert all(tag.startswith("ref_web_") for tag in tags)
