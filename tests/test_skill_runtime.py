@@ -854,7 +854,9 @@ def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> No
     assert "- Python:" in out
     assert "$BOX_AGENT_PYTHON" in out
     assert "- Node:" in out
-    assert "不可用" in out
+    assert "初始化时未确认可用的 Node" in out
+    assert "应直接报告依赖缺失" not in out
+    assert "不要回退系统 node" not in out
     assert "npm install -g" in out
     assert "$BOX_AGENT_SKILL_TOOLS_ROOT" in out
     assert "标准 `python`/`python3`" in out
@@ -871,8 +873,26 @@ def test_runtime_prompt_does_not_advertise_execute_code_when_sandbox_is_disabled
 
     out = build_skill_runtime_prompt(ctx)
 
-    assert "本 session 不可用" in out
+    assert "初始化时未确认可用的 shell Python" in out
+    assert "实际检测和工具执行结果为准" in out
+    assert "execute_code" not in out
+
+
+def test_runtime_prompt_does_not_turn_missing_python_into_an_execution_ban(
+    tmp_path: Path,
+) -> None:
+    sandbox = SandboxEnvironment(base_dir=tmp_path)
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        sandbox_env=sandbox,
+        node_runtime_root=tmp_path / "missing-node",
+    )
+
+    out = build_skill_runtime_prompt(ctx)
+
+    assert "初始化时未确认可用的 shell Python" in out
     assert "仅 `execute_code` 沙箱可用" not in out
+    assert "不要调用" not in out
 
 
 def test_runtime_prompt_mentions_available_self_managed_node(tmp_path: Path) -> None:

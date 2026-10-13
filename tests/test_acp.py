@@ -620,6 +620,49 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tmp_path, monkeypatch):
+    import box_agent.tools.bash_tool as bash_module
+    monkeypatch.setattr(bash_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bash_module, "bundled_win_bash", lambda: None)
+    monkeypatch.delenv("BOX_AGENT_BUNDLED_BASH", raising=False)
+    installed_bash = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
+    class RuntimeConn(DummyConn):
+        async def ext_method(self, method, payload):
+            assert method == "session/runtime_environment"
+            assert payload["sessionId"] == capable.sessionId
+            if payload["capability"] == "git":
+                return {"status": "ready", "env": {"BOX_AGENT_BUNDLED_BASH": str(installed_bash)}}
+            return {"status": "missing", "logTail": "not installed"}
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    host = BoxACPAgent(RuntimeConn(), config, DummyLLM(), [], "system")
+    plain = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    capable = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "host_capabilities": {"runtime_environment": 1},
+    }))
+    assert "local_environment" not in host._sessions[plain.sessionId].agent.tools
+    tools = host._sessions[capable.sessionId].agent.tools
+    assert "local_environment" in tools
+    assert tools["execute_code"].runtime_preparer is not None
+    result = await tools["local_environment"].execute("python")
+    assert result.success
+    assert "not installed" in result.content
+    shell_tool = tools["bash"]
+    assert shell_tool.shell_name == "PowerShell"
+    installed_bash.parent.mkdir(parents=True)
+    installed_bash.write_bytes(b"fixture")
+    installed = await tools["local_environment"].execute("git", "ensure")
+    assert tools["bash"] is shell_tool
+    assert shell_tool.shell_name == "bash"
+    assert json.loads(installed.content)["shell"]["name"] == "bash"
+    assert "syntax" in json.loads(installed.content)["shell"]["instruction"]
+
+
+@pytest.mark.asyncio
 async def test_acp_skillhub_install_uses_host_rpc_after_confirmation(tmp_path) -> None:
     class SkillHubConn(DummyConn):
         def __init__(self):
@@ -1150,10 +1193,17 @@ async def test_acp_session_creation_and_restore_do_not_scan_skills_on_event_loop
                 state.agent.session_log.close()
 
 
-def test_sandbox_prompt_requires_execute_code_for_explicit_python_results():
+def test_sandbox_prompt_requires_real_python_results_without_forcing_one_tool():
     assert "用户要求“用/使用/运行 Python”得到一个具体结果" in SANDBOX_INFO_PROMPT
-    assert "必须调用 `execute_code` 返回真实执行结果" in SANDBOX_INFO_PROMPT
+    assert "必须实际运行 Python 并返回真实执行结果" in SANDBOX_INFO_PROMPT
+    assert "可使用 `execute_code` 或可用的 shell Python" in SANDBOX_INFO_PROMPT
+    assert "必须调用 `execute_code`" not in SANDBOX_INFO_PROMPT
     assert "不要只给代码示例" in SANDBOX_INFO_PROMPT
+
+
+def test_sandbox_prompt_targets_package_installation_without_banning_shell():
+    assert "通过目标解释器的 `-m pip` 安装" in SANDBOX_INFO_PROMPT
+    assert "**绝对禁止** `bash` 跑 `pip install`" not in SANDBOX_INFO_PROMPT
 
 
 def test_sandbox_prompt_limits_single_execute_code_argument_size():

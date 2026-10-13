@@ -127,10 +127,8 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
             f"- Python: {python.provider}，标准 `python`/`python3` 已指向受管运行时"
             "（也可用 `$BOX_AGENT_PYTHON`）"
         )
-    elif ctx.sandbox_mode:
-        py_line = "- Python: 仅 `execute_code` 沙箱可用，无 shell python"
     else:
-        py_line = "- Python: 本 session 不可用；不要调用 `execute_code` 或 shell python"
+        py_line = "- Python: 初始化时未确认可用的 shell Python；当前可用性以实际检测和工具执行结果为准"
     if python.notes:
         py_line += f" — {'; '.join(python.notes)}"
     lines.append(py_line)
@@ -147,7 +145,7 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
             f"（内部路径：{via}）"
         )
     else:
-        node_line = "- Node: 不可用——skill 若依赖 Node 应直接报告依赖缺失，不要回退系统 node"
+        node_line = "- Node: 初始化时未确认可用的 Node；当前可用性以实际检测和工具执行结果为准"
     if node.notes:
         node_line += f" — {'; '.join(node.notes)}"
     lines.append(node_line)

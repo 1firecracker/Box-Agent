@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from unittest.mock import AsyncMock
+from types import SimpleNamespace
+
+import pytest
+
+from box_agent.tools.runtime_environment_tool import RuntimeEnvironmentTool
+from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment
+
+
+@pytest.mark.asyncio
+async def test_status_returns_logs_without_installing_or_exposing_environment():
+    requester = AsyncMock(return_value={
+        "status": "ready", "logTail": "installation verified", "env": {
+            "BOX_AGENT_SANDBOX_PYTHON": "C:/runtime/python.exe", "API_TOKEN": "private",
+        },
+    })
+    tool = RuntimeEnvironmentTool(requester)
+    applied = []
+    tool.apply_environment = applied.append
+    result = await tool.execute("python")
+    assert result.success
+    assert json.loads(result.content)["logTail"] == "installation verified"
+    assert "env" not in json.loads(result.content)
+    assert applied == [{"BOX_AGENT_SANDBOX_PYTHON": "C:/runtime/python.exe"}]
+    requester.assert_awaited_once_with({"capability": "python", "action": "status"})
+
+
+@pytest.mark.asyncio
+async def test_ensure_checks_status_then_joins_host_installation():
+    requester = AsyncMock(side_effect=[{"status": "installing"}, {"status": "ready"}])
+    result = await RuntimeEnvironmentTool(requester).execute("python", "ensure")
+    assert result.success
+    assert [call.args[0]["action"] for call in requester.await_args_list] == ["status", "ensure"]
+
+
+@pytest.mark.asyncio
+async def test_failed_preparation_returns_reason_and_log_without_looping():
+    requester = AsyncMock(side_effect=[{"status": "missing"}, {
+        "status": "failed", "error": "archive verification failed", "logTail": "sha256 mismatch",
+    }])
+    result = await RuntimeEnvironmentTool(requester).execute("python", "ensure")
+    assert not result.success
+    assert result.error == "archive verification failed"
+    assert "sha256 mismatch" in result.content
+    assert requester.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_without_claiming_installation_failed():
+    requester = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await RuntimeEnvironmentTool(requester).ensure_python()
+
+
+@pytest.mark.asyncio
+async def test_rejects_arbitrary_capability_without_contacting_host():
+    requester = AsyncMock()
+    result = await RuntimeEnvironmentTool(requester).execute("https://example.org/installer", "ensure")
+    assert not result.success
+    requester.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["status", "load"])
+async def test_browser_reports_installation_and_connection_separately_without_installing(action):
+    requester = AsyncMock(return_value={
+        "status": "ready", "installationReady": True, "installerRunning": False,
+        "mcp": {"state": "failed", "error": "connection timeout"},
+        "logTail": "download verified", "environments": [{"path": "C:/browser/chrome.exe"}],
+        "env": {"BOX_AGENT_BROWSER_EXECUTABLE_PATH": "C:/browser/chrome.exe", "API_TOKEN": "private"},
+    })
+    tool = RuntimeEnvironmentTool(requester)
+    applied = []
+    tool.apply_environment = applied.append
+    result = await tool.execute("browser", action)
+    body = json.loads(result.content)
+    assert result.success
+    assert body["installationReady"] is True
+    assert body["mcp"]["state"] == "failed"
+    assert body["logTail"] == "download verified"
+    assert body["environments"][0]["path"] == "C:/browser/chrome.exe"
+    assert "private" not in result.content
+    assert applied == [{"BOX_AGENT_BROWSER_EXECUTABLE_PATH": "C:/browser/chrome.exe"}]
+    requester.assert_awaited_once_with({"capability": "browser", "action": "status"})
+
+
+@pytest.mark.asyncio
+async def test_browser_ensure_joins_the_host_installer():
+    requester = AsyncMock(side_effect=[{"status": "installing"}, {
+        "status": "ready", "installationReady": True, "mcp": {"state": "connecting"},
+    }])
+    result = await RuntimeEnvironmentTool(requester).execute("browser", "ensure")
+    assert result.success
+    assert json.loads(result.content)["mcp"]["state"] == "connecting"
+    assert [call.args[0] for call in requester.await_args_list] == [
+        {"capability": "browser", "action": "status"},
+        {"capability": "browser", "action": "ensure"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["installing", "missing", "failed"])
+async def test_execute_code_returns_facts_without_waiting_or_installing(monkeypatch, status):
+    tool = JupyterSandboxTool()
+    requester = AsyncMock(return_value={
+        "status": status, "installerRunning": status == "installing",
+        "components": [{"id": "python-packages", "ready": False, "missing": ["ipykernel"]}],
+        "logTail": "pip pending" if status == "installing" else "offline",
+    })
+    environment = RuntimeEnvironmentTool(requester)
+    tool.runtime_preparer = environment.ensure_python
+    get_env = AsyncMock()
+    monkeypatch.setattr(tool, '_get_sandbox_env', get_env)
+    result = await tool.execute('print(1)')
+    assert not result.success
+    facts = json.loads(result.content)
+    assert facts["status"] == status
+    assert facts["components"][0]["missing"] == ["ipykernel"]
+    assert facts["logTail"]
+    assert "action='ensure'" in result.error
+    requester.assert_awaited_once_with({"capability": "python", "action": "status"})
+    get_env.assert_not_called()
+
+
+def test_restored_python_invalidates_failed_environment_cache(tmp_path, monkeypatch):
+    for key in ('BOX_AGENT_SANDBOX_PYTHON', 'BOX_AGENT_BUNDLED_PYTHON'):
+        monkeypatch.delenv(key, raising=False)
+    python = tmp_path / 'python.exe'
+    tool = JupyterSandboxTool(runtime_env={'BOX_AGENT_SANDBOX_PYTHON': str(python)})
+    monkeypatch.setattr(JupyterSandboxTool, '_sandbox_env', None)
+    monkeypatch.setattr(JupyterSandboxTool, '_sandbox_env_key', None)
+    before = tool._get_sandbox_env()
+    assert not before._bundled_override
+    python.write_bytes(b'fixture')
+    tool.update_runtime_env({'BOX_AGENT_SANDBOX_PYTHON': str(python)})
+    after = tool._get_sandbox_env()
+    assert after is not before
+    assert after.python_path == python
+    assert after._bundled_override
+
+
+@pytest.mark.asyncio
+async def test_python_preparation_success_continues_same_call(monkeypatch, tmp_path):
+    tool = JupyterSandboxTool()
+    order = []
+    python = tmp_path / 'python.exe'
+    python.write_bytes(b'fixture')
+
+    async def prepare():
+        order.append('prepared')
+        tool.update_runtime_env({'BOX_AGENT_SANDBOX_PYTHON': str(python)})
+
+    async def ensure_ready():
+        order.append('kernel-init')
+
+    tool.runtime_preparer = prepare
+    monkeypatch.setattr(JupyterSandboxTool, '_sessions', {})
+    monkeypatch.setattr(JupyterSandboxTool, '_sandbox_env', None)
+    monkeypatch.setattr(JupyterSandboxTool, '_sandbox_env_key', None)
+    monkeypatch.setattr(SandboxEnvironment, 'ensure_ready', AsyncMock())
+    session = SimpleNamespace(start=ensure_ready, workspace=tmp_path)
+    monkeypatch.setattr(tool, '_get_workspace', lambda key: tmp_path)
+    monkeypatch.setattr(tool, '_create_session', lambda key, workspace, env: session)
+    monkeypatch.setattr(tool, '_execute_session_code', lambda session, code, timeout: ('1', [], None))
+    result = await tool.execute('print(1)')
+    assert order == ['prepared', 'kernel-init']
+    assert result.success
+    assert result.content == '1'
