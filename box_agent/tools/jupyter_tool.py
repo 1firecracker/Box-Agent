@@ -1622,7 +1622,7 @@ Best practices:
   is actually required.
 - Use print() to see intermediate results
 - Install missing task packages only into the managed interpreter that executes the code.
-  When using a shell, use its `-m pip`; do not modify it while the managed installer is running.
+  When using a shell, use that interpreter's `-m pip`; do not modify it while the managed installer is running.
 
 Output formats:
 - Text output (print statements, repr)
