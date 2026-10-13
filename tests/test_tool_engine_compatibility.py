@@ -2,7 +2,7 @@
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
 descriptions, PPT entry contracts, tool handoffs, child execution, background
-retention and connector search apply before exact comparisons.
+retention, connector search and managed runtimes apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -123,6 +123,54 @@ _CONNECTOR_SEARCH_SCHEMA = json.loads(
         encoding="utf-8"
     )
 )
+_MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
+    "bash": (
+        (
+            "Execute bash commands in foreground or background.\n\n",
+            "Execute bash commands in foreground or background.\n\n"
+            'Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") '
+            "for that capability when available; join any active installation. Do not use or install alternate "
+            "runtimes or ask the user to switch environments. On failure, report the returned cause or retry "
+            "the managed installer.\n\n",
+        ),
+        (
+            '  - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"\n',
+            '  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; '
+            "otherwise prepare the managed Python through local_environment when available. "
+            'Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).\n',
+        ),
+    ),
+    "execute_code": (
+        (
+            "This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:\n",
+            "This tool runs Python code in a **real Jupyter kernel**:\n"
+            "- Use only application-managed Python, normally the default host-prepared sandbox.\n"
+            '  If it is not ready, use local_environment(action="ensure", capability="python") when available\n'
+            "  to install or wait for the managed environment. Do not duplicate an active installation.\n"
+            "  Do not use or install alternate runtimes or ask the user to switch environments.\n"
+            "- Omit python_path unless specifying a verified application-managed interpreter with working\n"
+            "  ipykernel. Its path is retained for the kernel session. A path change requires a new\n"
+            "  session_id; variables cannot migrate.\n",
+        ),
+        (
+            "- Pre-installed packages:",
+            "- The default managed environment prepares:",
+        ),
+        (
+            "- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout\n"
+            "- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package\n",
+            "- Check actual imports before installing missing packages into the managed interpreter.\n"
+            "  For missing Python/ipykernel, use the managed installer via local_environment when available.\n"
+            "  If preparation fails, use returned diagnostics to retry or report the cause, not switch runtimes.\n",
+        ),
+        (
+            "- Never use the bash tool's `pip install` for sandbox packages — bash runs against the\n"
+            "  host Python and the sandbox kernel will not see those packages\n",
+            "- Install missing task packages only into the managed interpreter that executes the code.\n"
+            "  When using a shell, use that interpreter's `-m pip`; do not modify it while the managed installer is running.\n",
+        ),
+    ),
+}
 _C5_DISCOVERABLE = {
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
     "mcp_config", "report_execution_result",
@@ -365,6 +413,22 @@ def _assert_schema_contract(tools, profile):
             entry["schema"]["input_schema"]["properties"]["temporary"] = {
                 "type": "boolean", "default": False,
                 "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+            }
+        for before, after in _MANAGED_RUNTIME_DESCRIPTION_CHANGES.get(tool.name, ()):
+            description = entry["schema"]["description"]
+            assert description.count(before) == 1, (tool.name, before)
+            entry["schema"]["description"] = description.replace(before, after)
+        if tool.name == "execute_code":
+            properties = entry["schema"]["input_schema"]["properties"]
+            assert "python_path" not in properties
+            properties["python_path"] = {
+                "type": "string",
+                "description": (
+                    "Optional absolute path to a verified application-managed Python with ipykernel. "
+                    "Prefer omitting this to use the default managed environment. Do not use this "
+                    "parameter to switch to a system, project or third-party runtime. Retained for "
+                    "this kernel session; a path change requires a new session_id."
+                ),
             }
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name

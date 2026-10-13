@@ -7451,7 +7451,8 @@ async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
     assert "## Skill Runtime Context" in prompt
     assert "$BOX_AGENT_PYTHON" in prompt
     assert "- Node:" in prompt
-    assert "不可用" in prompt
+    assert "- Node: 初始化时未确认可用的 Node；当前可用性以实际检测和工具执行结果为准" in prompt
+    assert "local_environment" in prompt
     assert "npm install -g" in prompt
     assert "$BOX_AGENT_SKILL_TOOLS_ROOT" in prompt
 

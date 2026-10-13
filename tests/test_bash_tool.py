@@ -1395,7 +1395,9 @@ def test_posix_description_uses_injected_python_and_reserved_scratch_directory(m
 
     assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
     assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
-    assert "otherwise check for an available Python executable" in description
+    assert "Use only application-managed Python, Node and Git" in description
+    assert "otherwise prepare the managed Python through local_environment" in description
+    assert "otherwise check for an available Python executable" not in description
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
 
