@@ -12,7 +12,7 @@ from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment
 
 
 @pytest.mark.asyncio
-async def test_status_returns_logs_without_installing_or_exposing_environment():
+async def test_ready_status_omits_logs_without_installing_or_exposing_environment():
     requester = AsyncMock(return_value={
         "status": "ready", "logTail": "installation verified", "env": {
             "BOX_AGENT_SANDBOX_PYTHON": "C:/runtime/python.exe", "API_TOKEN": "private",
@@ -23,17 +23,79 @@ async def test_status_returns_logs_without_installing_or_exposing_environment():
     tool.apply_environment = applied.append
     result = await tool.execute("python")
     assert result.success
-    assert json.loads(result.content)["logTail"] == "installation verified"
+    assert "logTail" not in json.loads(result.content)
     assert "env" not in json.loads(result.content)
     assert applied == [{"BOX_AGENT_SANDBOX_PYTHON": "C:/runtime/python.exe"}]
     requester.assert_awaited_once_with({"capability": "python", "action": "status"})
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capability", ["python", "node", "git", "browser"])
+@pytest.mark.parametrize("action", ["status", "load", "ensure"])
+async def test_ready_results_keep_paths_and_shell_without_installer_details(monkeypatch, capability, action):
+    import box_agent.tools.runtime_environment_tool as environment_module
+
+    monkeypatch.setattr(environment_module, "python_candidates", lambda *args: [])
+    monkeypatch.setattr(environment_module.shutil, "which", lambda *args, **kwargs: None)
+    response = {
+        "status": "ready", "capability": capability, "installerRunning": False,
+        "components": [{"id": capability, "ready": True}], "progress": [{"phase": "all-done"}],
+        "logTail": "old download details", "logPath": "installer.log", "error": None,
+        "env": {"PATH": "internal-path"},
+    }
+    if capability == "browser":
+        response.update(mcp={"state": "connected"}, environments=[{"path": "browser.exe"}])
+    requester = AsyncMock(return_value=response)
+    tool = RuntimeEnvironmentTool(requester)
+    shell = {"name": "bash", "instruction": "Use bash syntax."}
+    tool.apply_environment = lambda env: shell
+    result = await tool.execute(capability, action)
+    body = json.loads(result.content)
+    assert result.success
+    assert body["status"] == "ready"
+    assert body["shell"] == shell
+    assert "environments" in body
+    assert not {"components", "progress", "logTail", "logPath", "error", "env"} & body.keys()
+    assert response["logTail"] == "old download details"
+    requester.assert_awaited_once_with({"capability": capability, "action": "status"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["missing", "installing", "failed"])
+async def test_not_ready_status_retains_diagnostics(status):
+    diagnostics = {
+        "status": status, "components": [{"id": "git", "ready": False}],
+        "progress": [{"phase": "download"}], "logTail": "diagnostic details",
+        "logPath": "installer.log", "error": "install failed" if status == "failed" else None,
+    }
+    result = await RuntimeEnvironmentTool(AsyncMock(return_value=diagnostics)).execute("git")
+    body = json.loads(result.content)
+    assert all(body[key] == value for key, value in diagnostics.items())
+
+
+@pytest.mark.asyncio
+async def test_load_retains_probe_failure_when_host_is_ready(monkeypatch):
+    import box_agent.tools.runtime_environment_tool as environment_module
+
+    monkeypatch.setattr(environment_module, "probe_python", AsyncMock(return_value={
+        "status": "missing_packages", "missing_modules": ["ipykernel_launcher"],
+    }))
+    requester = AsyncMock(return_value={"status": "ready", "logTail": "diagnostic details"})
+    result = await RuntimeEnvironmentTool(requester).execute("python", "load", python_path="python.exe")
+    body = json.loads(result.content)
+    assert body["logTail"] == "diagnostic details"
+    assert body["environments"][0]["missing_modules"] == ["ipykernel_launcher"]
+
+
+@pytest.mark.asyncio
 async def test_ensure_checks_status_then_joins_host_installation():
-    requester = AsyncMock(side_effect=[{"status": "installing"}, {"status": "ready"}])
+    requester = AsyncMock(side_effect=[{"status": "installing"}, {
+        "status": "ready", "logTail": "download complete", "progress": [{"phase": "all-done"}],
+    }])
     result = await RuntimeEnvironmentTool(requester).execute("python", "ensure")
     assert result.success
+    assert "logTail" not in json.loads(result.content)
+    assert "progress" not in json.loads(result.content)
     assert [call.args[0]["action"] for call in requester.await_args_list] == ["status", "ensure"]
 
 

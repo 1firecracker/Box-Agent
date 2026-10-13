@@ -11,6 +11,12 @@ and returns `status` (`ready`, `missing`, `installing`, `failed`), component/pro
 facts, `installerRunning`, `error`, and a bounded redacted `logTail` plus `logPath`. Historical log text is
 diagnostic data, not a lock or proof that a current installation succeeded.
 
+Model-facing `local_environment` results omit installer logs, component details and
+progress when ready, retaining paths, shell instructions and MCP state. Not-ready,
+probe-failure and unconnected-browser results retain diagnostics. Successful
+`execute_code` continues to return only execution output; internal status checks
+and installer coordination are unchanged.
+
 On readiness, the host may return an `env` object containing execution paths. Only
 allowlisted runtime keys reach future tool subprocesses; they are not model output.
 The Agent does not mutate global environment variables or wait for its own restart.

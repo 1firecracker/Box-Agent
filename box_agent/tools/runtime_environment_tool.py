@@ -152,6 +152,20 @@ class RuntimeEnvironmentTool(Tool):
         )
         if action == "load" and any(e.get("status") == "ready" for e in result.get("environments", [])):
             success = True
+        # Keep successful results useful without replaying installer diagnostics
+        # into model context. File readiness alone does not prove MCP readiness.
+        if (
+            result.get("status") == "ready"
+            and not result.get("error")
+            and not result.get("installerRunning")
+            and (capability != "browser" or result.get("mcp", {}).get("state") == "connected")
+            and all(
+                entry.get("status", "ready") == "ready" and entry.get("exists", True)
+                for entry in result.get("environments", [])
+            )
+        ):
+            for key in ("components", "progress", "logTail", "logPath", "error"):
+                result.pop(key, None)
         return ToolResult(
             success=success,
             content=json.dumps(result, ensure_ascii=False),
