@@ -77,8 +77,10 @@ def test_discovery_is_bounded_and_deduplicates_paths(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_load_finds_alternative_while_host_installs_without_ensure(tmp_path, monkeypatch):
     import box_agent.tools.runtime_environment_tool as environment_tool
-    path = str(tmp_path / "python.exe")
-    requester = AsyncMock(return_value={"status": "installing", "progress": [], "env": {"TOKEN": "private"}})
+    # macOS temporary paths contain /private; that is not a leaked credential.
+    path = str(tmp_path / "private" / "python.exe")
+    secret = "test-only-host-token-must-not-leak"
+    requester = AsyncMock(return_value={"status": "installing", "progress": [], "env": {"TOKEN": secret}})
     probe = AsyncMock(return_value={"path": path, "status": "ready", "kernel_ready": True})
     monkeypatch.setattr(environment_tool, "probe_python", probe)
     result = await RuntimeEnvironmentTool(requester).execute("python", "load", path, ["matplotlib"])
@@ -86,7 +88,8 @@ async def test_load_finds_alternative_while_host_installs_without_ensure(tmp_pat
     assert result.success and body["status"] == "installing"
     assert body["environments"][0]["source"] == "explicit"
     assert body["environments"][0]["path"] == path
-    assert "private" not in result.content
+    assert "env" not in body
+    assert secret not in result.content
     requester.assert_awaited_once_with({"capability": "python", "action": "status"})
     probe.assert_awaited_once_with(path, ["matplotlib"])
 
