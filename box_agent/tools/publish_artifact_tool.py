@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
 
-from box_agent.artifact_publication import metadata_path, read_metadata, write_metadata
+from box_agent.artifact_publication import STAGING_DIRECTORY, metadata_path, read_metadata, write_metadata
 from box_agent.tools.base import Tool, ToolResult, ToolInvocationRejected, check_tool_cancellation
 from box_agent.tools.file_change_receipts import (
     FileWriteInvocationContext, before_write, destination_lock, file_change_result,
@@ -115,7 +115,7 @@ class PublishArtifactTool(Tool):
                     return error
                 check_tool_cancellation()
                 # A random private input directory keeps file extensions intact for builders.
-                staging_root = self.workspace_dir / ".box-agent-staging"
+                staging_root = self.workspace_dir / STAGING_DIRECTORY
                 staging_root.mkdir(exist_ok=True)
                 if staging_root.resolve().parent != self.workspace_dir or staging_root.is_symlink():
                     raise ValueError("Artifact staging directory must stay inside the workspace")
