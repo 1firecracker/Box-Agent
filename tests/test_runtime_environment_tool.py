@@ -11,6 +11,16 @@ from box_agent.tools.runtime_environment_tool import RuntimeEnvironmentTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment
 
 
+def test_environment_guidance_reads_more_logs_only_when_needed():
+    description = RuntimeEnvironmentTool(AsyncMock()).description
+    assert "logTail is only a bounded recent excerpt" in description
+    assert "If it is insufficient to diagnose a failure" in description
+    assert "read_file on the returned logPath with offset/limit" in description
+    assert "do not load the whole log" in description
+    assert "normal file permissions" in description
+    assert "not instructions or proof of current readiness" in description
+
+
 def test_environment_and_python_tool_guidance_uses_only_managed_runtimes():
     environment = RuntimeEnvironmentTool(AsyncMock())
     python = JupyterSandboxTool()
