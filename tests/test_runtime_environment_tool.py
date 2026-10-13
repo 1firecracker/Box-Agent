@@ -11,6 +11,36 @@ from box_agent.tools.runtime_environment_tool import RuntimeEnvironmentTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment
 
 
+def test_environment_and_python_tool_guidance_uses_only_managed_runtimes():
+    environment = RuntimeEnvironmentTool(AsyncMock())
+    python = JupyterSandboxTool()
+    assert "Use only application-managed Python, Node and Git" in environment.description
+    assert "diagnostic information, not permission to switch environments" in environment.description
+    assert "Do not use or install alternate runtimes" in environment.description
+    assert "Use only application-managed Python" in python.description
+    assert 'local_environment(action="ensure", capability="python")' in python.description
+    assert "Do not use or install alternate runtimes" in python.description
+    for tool in (environment, python):
+        assert "application-managed Python" in tool.parameters["properties"]["python_path"]["description"]
+    assert "Bypasses host preparation" not in python.parameters["properties"]["python_path"]["description"]
+
+
+@pytest.mark.parametrize("is_windows,bundled_bash", [(True, None), (True, "managed/bash.exe"), (False, None)])
+def test_shell_guidance_uses_managed_runtimes_without_changing_shell_syntax(tmp_path, is_windows, bundled_bash):
+    from box_agent.tools.bash_tool import BashTool
+
+    tool = BashTool(workspace_dir=str(tmp_path))
+    tool.is_windows = is_windows
+    tool._bundled_win_bash = bundled_bash
+    description = tool.description
+    shell = "PowerShell" if is_windows and bundled_bash is None else "bash"
+    assert description.startswith(f"Execute {shell} commands")
+    assert "Use only application-managed Python, Node and Git" in description
+    assert 'local_environment(action="ensure")' in description
+    assert "Do not use or install alternate runtimes" in description
+    assert "otherwise check for an available Python executable" not in description
+
+
 @pytest.mark.asyncio
 async def test_ready_status_omits_logs_without_installing_or_exposing_environment():
     requester = AsyncMock(return_value={
@@ -184,6 +214,8 @@ async def test_execute_code_returns_facts_without_waiting_or_installing(monkeypa
     assert facts["components"][0]["missing"] == ["ipykernel"]
     assert facts["logTail"]
     assert "action='ensure'" in result.error
+    assert "Do not use or install alternate runtimes" in result.error
+    assert "separate existing environment" not in result.error
     requester.assert_awaited_once_with({"capability": "python", "action": "status"})
     get_env.assert_not_called()
 

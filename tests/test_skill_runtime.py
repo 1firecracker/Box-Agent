@@ -856,7 +856,11 @@ def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> No
     assert "- Node:" in out
     assert "初始化时未确认可用的 Node" in out
     assert "应直接报告依赖缺失" not in out
-    assert "不要回退系统 node" not in out
+    assert "Python / Node / Git 仅使用应用内置或受管运行时" in out
+    assert "不要切换到系统安装、项目虚拟环境或第三方软件自带的运行时" in out
+    assert "action=ensure 补装或等待现有安装" in out
+    assert "不要重复下载或另装一套运行时" in out
+    assert "普通聊天不需要检查或等待这些运行时" in out
     assert "npm install -g" in out
     assert "$BOX_AGENT_SKILL_TOOLS_ROOT" in out
     assert "标准 `python`/`python3`" in out

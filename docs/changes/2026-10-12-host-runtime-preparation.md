@@ -26,14 +26,21 @@ wait timeout reports that installation may still be running; inspect status next
 Office Desktop retains its startup download plan and paths. Explicit tool `ensure`
 only supplements the requested capability and its packages, sharing the startup
 installer lock. Settings retain explicit forced repair. `execute_code` returns
-not-ready facts immediately instead of silently waiting/retrying: the model chooses
-`ensure` to wait/install, `load` to verify alternatives, or a permitted shell fallback.
+not-ready facts immediately instead of silently waiting/retrying: the model uses
+`ensure` to wait/install and `load` to inspect readiness, then retries with the managed runtime.
 Do not write into a managed environment while its installer is running.
 This change does not add arbitrary pip/npm installs or LibreOffice installers.
 Source changes require a new Box-Agent runtime build/install before packaged hosts
 can use the capability.
 
 ## Alternate Python (2026-10-13)
+
+Policy update: model prompts and tool guidance now require application-managed
+Python, Node and Git. Missing runtimes use the existing host installer via `ensure`;
+active installs are joined, and failures are diagnosed/retried without switching
+environments or asking users to install another runtime. Ordinary chat does not wait.
+The alternate-path mechanics below remain compatible at the API level, but are no
+longer recommended to the model. This is prompt guidance, not a new execution gate.
 
 - Desktop startup preparation is enabled again, fire-and-forget, without an automatic
   dialog or an ordinary-chat gate. The existing installer/download plan is unchanged.

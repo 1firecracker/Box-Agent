@@ -1587,20 +1587,22 @@ class JupyterSandboxTool(Tool):
         return f"""Execute Python code in a persistent Jupyter kernel sandbox.
 
 This tool runs Python code in a **real Jupyter kernel**:
-- By default use the host-prepared sandbox environment. To use another installed Python,
-  pass its absolute python_path; it must have working ipykernel. local_environment(action="load",
-  capability="python") can inspect candidates and required imports when available.
-- Explicit Python bypasses host installation and keeps that interpreter for the kernel session.
-  Changing Python in an existing session requires a new session_id; variables cannot migrate.
+- Use only application-managed Python, normally the default host-prepared sandbox.
+  If it is not ready, use local_environment(action="ensure", capability="python") when available
+  to install or wait for the managed environment. Do not duplicate an active installation.
+  Do not use or install alternate runtimes or ask the user to switch environments.
+- Omit python_path unless specifying a verified application-managed interpreter with working
+  ipykernel. Its path is retained for the kernel session. A path change requires a new
+  session_id; variables cannot migrate.
 - Variables, functions, classes, imports all persist between calls
 - Reads may use allowed input paths, but durable writes are confined to the session cwd;
   runtime-managed temporary/internal roots remain available
 - The default managed environment prepares: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,
   openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,
   beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet
-- Other Python environments may lack these packages; check actual imports, not this list.
-- Install packages only when missing, into the selected interpreter. Missing ipykernel must
-  be installed before this tool can start; use that Python's absolute path with -m pip in a shell.
+- Check actual imports before installing missing packages into the managed interpreter.
+  For missing Python/ipykernel, use the managed installer via local_environment when available.
+  If preparation fails, use returned diagnostics to retry or report the cause, not switch runtimes.
 - Ideal for data analysis: load once, analyze many times
 
 Example workflow:
@@ -1619,9 +1621,8 @@ Best practices:
   Use ordered write_file chunks with chunk_index/final unless Python processing
   is actually required.
 - Use print() to see intermediate results
-- Install missing packages into the interpreter that will execute the code. When using
-  a shell, use that interpreter's `-m pip`; packages in another environment may not be
-  visible to the sandbox kernel.
+- Install missing task packages only into the managed interpreter that executes the code.
+  When using a shell, use its `-m pip`; do not modify it while the managed installer is running.
 
 Output formats:
 - Text output (print statements, repr)
@@ -1663,7 +1664,7 @@ Output formats:
                 },
                 "python_path": {
                     "type": "string",
-                    "description": "Optional absolute path to an installed Python with ipykernel. Bypasses host preparation; retained for this kernel session. Use a new session_id to change interpreter without losing existing state.",
+                    "description": "Optional absolute path to a verified application-managed Python with ipykernel. Prefer omitting this to use the default managed environment. Do not use this parameter to switch to a system, project or third-party runtime. Retained for this kernel session; a path change requires a new session_id.",
                 },
             },
             "required": ["code"],
@@ -1753,14 +1754,14 @@ Output formats:
             ):
                 return ToolResult(
                     success=False,
-                    error="PYTHON_ENVIRONMENT_CHANGED: use a new session_id to select "
-                          "another Python; existing variables remain in the old kernel.",
+                    error="PYTHON_ENVIRONMENT_CHANGED: a managed Python path change requires "
+                          "a new session_id; existing variables remain in the old kernel.",
                 )
             selected_env = SandboxEnvironment(
                 runtime_env=self.runtime_env, python_path=candidate,
             )
 
-        # Default execution checks host state; the model chooses whether to wait or switch.
+        # Default execution checks host state; the model chooses when to prepare or retry.
         if selected_env is None and self.runtime_preparer is not None:
             try:
                 await self.runtime_preparer()
@@ -1775,9 +1776,9 @@ Output formats:
                     error=f"RUNTIME_NOT_READY: {exc}\n"
                           "Report the current preparation state if relevant. Choose "
                           "local_environment(capability='python', action='ensure') to wait/install, "
-                          "or use a separate existing environment. Do not duplicate an active installation. "
-                          "Use local_environment(capability='python', action='load') to inspect "
-                          "alternatives; pass a verified absolute python_path to execute_code.",
+                          "then retry with the managed Python. Do not duplicate an active installation. "
+                          "If preparation fails, use returned logs to retry or report the cause. "
+                          "Do not use or install alternate runtimes or ask the user to switch environments.",
                 )
         env = selected_env or self._get_sandbox_env()
         try:

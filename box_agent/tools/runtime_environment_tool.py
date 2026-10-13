@@ -43,9 +43,11 @@ class RuntimeEnvironmentTool(Tool):
             "Inspect local Python/Node/Git/browser preparation status and recent installation logs, "
             "or ensure the environment through the host's existing background installer. "
             "Use action=load to discover absolute runtime paths and verify Python/ipykernel "
-            "and optional modules; this does not install or wait for installation. It can "
-            "inspect host, project .venv, user venv and PATH Python, or an explicit python_path. "
-            "Pass a ready candidate's path to execute_code(python_path=...). "
+            "and optional modules; this does not install or wait for installation. "
+            "Use only application-managed Python, Node and Git. Any other discovered candidates "
+            "are diagnostic information, not permission to switch environments. "
+            "Prefer execute_code's default Python; specify python_path only for a verified "
+            "application-managed interpreter. "
             "Use only when a task needs a missing runtime or to diagnose an environment error; "
             "do not call for ordinary conversation or repeatedly poll. execute_code checks "
             "its default Python and returns current status/logs when it is not ready; it does not wait. "
@@ -55,9 +57,9 @@ class RuntimeEnvironmentTool(Tool):
             "or client restart is required. Do not claim browser tools are connected until mcp.state "
             "is connected. Respect enabledPreference=false; do not enable a user-disabled capability. "
             "While installerRunning is true, do not start another installer or pip into its managed "
-            "environment; use a verified separate environment or wait. On failure, use the returned "
-            "logs to decide whether to retry, use another Python, or install into a separate environment "
-            "with shell tools under normal permissions. No arbitrary packages, "
+            "environment; wait through ensure. On failure, use the returned logs to retry or "
+            "report the cause. Do not use or install alternate runtimes, or ask the user to "
+            "switch environments. No arbitrary packages, "
             "download URLs, shell commands or system-wide environment changes are accepted."
         )
 
@@ -68,7 +70,7 @@ class RuntimeEnvironmentTool(Tool):
             "properties": {
                 "capability": {"type": "string", "enum": list(_CAPABILITIES)},
                 "action": {"type": "string", "enum": ["status", "load", "ensure"], "default": "status"},
-                "python_path": {"type": "string", "description": "Absolute Python path to inspect with capability=python, action=load."},
+                "python_path": {"type": "string", "description": "Absolute application-managed Python path to inspect with capability=python, action=load. Do not select an alternate environment."},
                 "modules": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$"}, "description": "Optional Python import names to verify on load (e.g. matplotlib, PIL). ipykernel is always checked."},
             },
             "required": ["capability"],

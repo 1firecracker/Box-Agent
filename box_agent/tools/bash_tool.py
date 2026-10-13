@@ -1406,6 +1406,8 @@ class BashTool(Tool):
         shell_examples = {
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
+Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
+
 Do NOT use Get-Content/type to read files; use read_file instead.
 For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
 For a one-level directory view, use a read-only non-recursive command such as Get-ChildItem -Name. Do not use PowerShell for recursive file discovery or content search.
@@ -1431,6 +1433,8 @@ Examples:
   - python -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
             "Unix": f"""Execute bash commands in foreground or background.
 
+Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
+
 Do NOT use cat/head/tail to read files; use read_file instead.
 For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
 For a one-level directory view, use a read-only non-recursive command such as find . -mindepth 1 -maxdepth 1 -print. Do not use Bash for recursive file discovery or content search.
@@ -1450,7 +1454,7 @@ Tips:
   - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
   - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
-  - If BOX_AGENT_PYTHON points to a working interpreter, run it as "$BOX_AGENT_PYTHON"; otherwise check for an available Python executable. Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
+  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; otherwise prepare the managed Python through local_environment when available. Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
   - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
   - For background commands, monitor with bash_output and terminate with bash_kill
