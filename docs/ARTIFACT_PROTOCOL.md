@@ -278,6 +278,11 @@ marked intermediate can be promoted without changing their bytes. Missing or
 outside-workspace paths (including symlinks) are rejected; sidecar write failures
 return a failed tool result.
 
+Transaction inputs under the workspace's root-level `.box-agent-staging/`
+directory are internal and never delivered, even with a `type: artifact`
+sidecar. Only the final destination after `publish_artifact(action="commit")`
+can be discovered and delivered under the normal publication rules.
+
 Already published files need no extra call: presentation builders and
 `generate_image(publish_artifact=True)` retain their publication behavior.
 There is no end-of-turn manifest overriding these outputs. Artifact envelopes
