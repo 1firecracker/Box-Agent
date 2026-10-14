@@ -11,7 +11,17 @@ import tempfile
 from typing import Iterable
 
 SUFFIX = ".artifact.json"
+STAGING_DIRECTORY = ".box-agent-staging"
 MAX_HASH_BYTES = 64 * 1024 * 1024
+
+
+def is_staging_file(path: Path, workspace: str | Path) -> bool:
+    """Publication transaction inputs are internal, even with artifact sidecars."""
+    try:
+        relative = path.resolve().relative_to(Path(workspace).resolve())
+        return bool(relative.parts) and relative.parts[0] == STAGING_DIRECTORY
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def metadata_path(path: Path) -> Path:
@@ -94,6 +104,8 @@ def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[s
 
 
 def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: str | None = None) -> bool:
+    if workspace and is_staging_file(path, workspace):
+        return True
     value = read_metadata(metadata_path(path))
     if value.get("type") == "intermediate_asset":
         return True
@@ -164,6 +176,8 @@ def apply_delivery_policy(raw_output: dict | None, workspace: str | None) -> dic
     path = Path(value)
     if not path.is_absolute():
         path = Path(workspace) / path
+    if is_staging_file(path, workspace):
+        return {**raw_output, "type": "intermediate_asset"}
     if is_unpublished_scoped_file(path, workspace):
         if path.is_file():
             is_intermediate(path, {}, workspace)  # Persist identity before a later move out of scope.

@@ -15,7 +15,7 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
-from ...artifact_publication import SUFFIX, intermediate_fingerprints, is_intermediate
+from ...artifact_publication import STAGING_DIRECTORY, SUFFIX, intermediate_fingerprints, is_intermediate
 
 _log = logging.getLogger("box_agent.core")
 
@@ -98,6 +98,7 @@ _IGNORE_DIRS = frozenset(
     {
         ".box-agent",
         ".box-agent-scratch",
+        STAGING_DIRECTORY,
         ".git",
         ".hg",
         ".ipynb_checkpoints",
