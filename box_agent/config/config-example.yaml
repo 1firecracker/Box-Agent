@@ -25,6 +25,25 @@ provider: "anthropic"
 # model accepts image input. Leave it absent when capability is unknown; CUA
 # then stays text-only unless another adapter declares vision support.
 # image_input: true
+
+# ===== Computer Use (Optional) =====
+# With tools.enable_mcp enabled, CUA is registered by default. Install the
+# driver with `box-agent install-cua`; `ensure_cua_ready` starts it on demand.
+# No driver binary is bundled and no manual CUA mcp.json entry is needed.
+# plugins:
+#   cua:
+#     server_name: computer-use
+#     feed_screenshots: true
+#     persist_images: true
+#     runtime:
+#       enabled: true # Set false to disable CUA (also overrides host enablement).
+#       mode: standalone # CLI owns its daemon; driver_path is optional.
+# Desktop hosts supply mode=external, driver_path and a private endpoint through
+# BOX_AGENT_CUA_RUNTIME_CONFIG. Do not copy a host endpoint into this file.
+# External mode never starts a fallback daemon or stops the host daemon.
+# A missing or null runtime accepts host settings, or CLI defaults without a host.
+# Downloads use RACCOON_CUA_DOWNLOAD_BASE_URL (HTTPS CDN) if configured;
+# otherwise official releases. Shared files: ~/.box-agent/resources/cua-driver/.
 # Provider dialect: models whose name starts with sensenova-/sn-sensenova- use
 # SenseNova thinking parameters and pseudo-tool-call recovery. This is an
 # operator-only compatibility override: only add a family after verifying its

@@ -31,6 +31,25 @@ def test_host_environment_selects_external_and_enables_plugin(monkeypatch):
     assert config.plugins["cua"]["runtime"]["enabled"]
 
 
+@pytest.mark.parametrize("plugin", [
+    {"feed_screenshots": False},
+    {"feed_screenshots": False, "runtime": None},
+    {"feed_screenshots": False, "runtime": {}},
+])
+def test_host_environment_accepts_empty_plugin_runtime(monkeypatch, plugin):
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", json.dumps({
+        "enabled": True, "mode": "external", "endpoint": "/host/socket",
+        "driver_path": "/trusted/driver"}))
+    config = SimpleNamespace(plugins={"cua": plugin})
+    service = create_cua_service(config)
+    assert service.config.enabled
+    assert service.config.mode == "external"
+    assert service.config.endpoint == "/host/socket"
+    assert service.config.driver_path == "/trusted/driver"
+    assert not service.settings.feed_screenshots
+    assert config.plugins["cua"]["runtime"]["enabled"]
+
+
 def test_readiness_tool_does_not_accept_model_selected_launch_configuration():
     assert EnsureCuaReadyTool(None).parameters["additionalProperties"] is False
 
