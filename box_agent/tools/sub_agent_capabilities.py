@@ -37,7 +37,8 @@ TRUSTED_NETWORK_TOOL_NAMES = frozenset(
     {"generate_image", "inspect_images", "web_extract", "web_search"}
 )
 TRUSTED_UNSCOPED_WRITE_TOOLS = frozenset({"generate_image"})
-PERMISSION_GATED_PROCESS_TOOL_NAMES = frozenset({"bash"})
+EXECUTION_TOOL_NAMES = frozenset({"bash", "execute_code"})
+DELEGABLE_PROCESS_TOOL_NAMES = EXECUTION_TOOL_NAMES | frozenset({"sandbox_status"})
 
 MINIMAL_DELEGATION_EXAMPLE: dict[str, Any] = {
     "task": "Read the provided files and summarize them.",
@@ -454,12 +455,12 @@ def parse_delegation_spec(
         read_only=not bool(
             requested_path_writes
             or set(normalized_required_tools) & TRUSTED_UNSCOPED_WRITE_TOOLS
-            or set(normalized_required_tools) & PERMISSION_GATED_PROCESS_TOOL_NAMES
+            or set(normalized_required_tools) & EXECUTION_TOOL_NAMES
         ),
         network=bool(
             (
                 set(normalized_required_tools)
-                & (TRUSTED_NETWORK_TOOL_NAMES | PERMISSION_GATED_PROCESS_TOOL_NAMES)
+                & (TRUSTED_NETWORK_TOOL_NAMES | EXECUTION_TOOL_NAMES)
             )
             or any(_is_managed_browser_tool(name) for name in normalized_required_tools)
         ),
@@ -551,7 +552,6 @@ def _tool_denial_reason(
     *,
     strategy: str,
     constraints: DelegationConstraints,
-    permission_negotiator_available: bool,
 ) -> str | None:
     if strategy == "batch_files" and name not in _BATCH_FILES_ALLOWED_TOOLS:
         return "not_allowed_by_strategy"
@@ -560,14 +560,10 @@ def _tool_denial_reason(
     if metadata is None:
         return "unknown_capability_metadata"
 
-    permission_gated_process = name in PERMISSION_GATED_PROCESS_TOOL_NAMES
-    if metadata.process:
-        if not permission_gated_process:
-            return "process_not_delegable"
-        if not permission_negotiator_available:
-            return "permission_negotiator_unavailable"
+    if metadata.process and name not in DELEGABLE_PROCESS_TOOL_NAMES:
+        return "process_not_delegable"
 
-    if constraints.read_only and (metadata.write or metadata.process):
+    if constraints.read_only and (metadata.write or name in EXECUTION_TOOL_NAMES):
         return "read_only"
     if not constraints.network and metadata.network:
         return "network_disabled"
@@ -576,7 +572,7 @@ def _tool_denial_reason(
     if (
         constraints.write_scope is not None
         and metadata.write
-        and not permission_gated_process
+        and name not in EXECUTION_TOOL_NAMES
         and name not in {"write_file", "append_file", "edit_file"}
     ):
         return "write_scope_unenforceable"
@@ -597,6 +593,8 @@ class CapabilityResolver:
         permission_negotiator_available: bool = False,
         refresh_skills: bool = True,
     ) -> ResolvedCapabilityBundle | CapabilityFailure:
+        # Keep permission_negotiator_available for existing callers. Execution
+        # tools request approval through their inherited policy only when needed.
         skills_or_failure = self._resolve_skills(spec, skill_loader, skill_access_filter, refresh=refresh_skills)
         if isinstance(skills_or_failure, CapabilityFailure):
             return skills_or_failure
@@ -650,7 +648,6 @@ class CapabilityResolver:
                 tool,
                 strategy=spec.strategy,
                 constraints=spec.constraints,
-                permission_negotiator_available=permission_negotiator_available,
             )
             if reason:
                 denied.append({"name": name, "origin": origin, "reason": reason})

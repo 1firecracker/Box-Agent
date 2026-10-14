@@ -719,7 +719,7 @@ async def test_general_loop_uses_parent_permission_negotiator_and_retries(tmp_pa
     assert len(negotiator.requests) == 1
 
 
-async def test_explicit_bash_with_write_scope_uses_parent_permission_boundary(
+async def test_explicit_bash_with_write_scope_does_not_add_approval(
     tmp_path,
 ):
     from box_agent.schema import FunctionCall, ToolCall
@@ -805,10 +805,7 @@ async def test_explicit_bash_with_write_scope_uses_parent_permission_boundary(
     assert result.raw_output["resolved_tools"] == ["bash", "write_file"]
     assert result.raw_output["constraints"]["write_scope"] == ["assets/hero.jpg"]
     assert bash_tool.calls == 1
-    assert len(negotiator.requests) == 1
-    assert negotiator.requests[0]["scope"] == "safety"
-    assert negotiator.requests[0]["requested_scope"] == "delegated_bash_command"
-    assert negotiator.requests[0]["persistent_supported"] is False
+    assert negotiator.requests == []
 
 
 async def test_files_with_write_tools_stay_in_general_loop(tmp_path):

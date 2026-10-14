@@ -519,35 +519,51 @@ def test_missing_required_tool_distinguishes_loading_from_not_found() -> None:
     assert ready.code == "REQUIRED_TOOL_NOT_FOUND"
 
 
-def test_derived_policy_allows_trusted_network_and_permission_gated_bash() -> None:
-    web_spec = _parse(required_tools=["web_search"])
-    bash_spec = _parse(required_tools=["bash"])
-    assert isinstance(web_spec, DelegationSpec)
-    assert isinstance(bash_spec, DelegationSpec)
-    assert bash_spec.constraints.read_only is False
-    assert bash_spec.constraints.network is True
+@pytest.mark.parametrize("name", ["bash", "execute_code"])
+@pytest.mark.parametrize("broker_available", [False, True])
+def test_execution_tools_inherit_parent_availability_without_extra_approval(
+    name, broker_available,
+) -> None:
+    spec = _parse(required_tools=[name])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.read_only is False
+    assert spec.constraints.network is True
+    parent_tool = NamedTool(name)
 
-    web_result = CapabilityResolver().resolve(
-        web_spec,
-        parent_tools={"web_search": NamedTool("web_search")},
-    )
-    bash_without_broker = CapabilityResolver().resolve(
-        bash_spec,
-        parent_tools={"bash": NamedTool("bash")},
-    )
-    bash_with_broker = CapabilityResolver().resolve(
-        bash_spec,
-        parent_tools={"bash": NamedTool("bash")},
-        permission_negotiator_available=True,
+    result = CapabilityResolver().resolve(
+        spec, parent_tools={name: parent_tool},
+        permission_negotiator_available=broker_available,
     )
 
-    assert isinstance(web_result, ResolvedCapabilityBundle)
-    assert isinstance(bash_without_broker, CapabilityFailure)
-    assert (
-        bash_without_broker.details["denied_reason"]
-        == "permission_negotiator_unavailable"
+    assert isinstance(result, ResolvedCapabilityBundle)
+    assert result.tools == {name: parent_tool}
+
+
+@pytest.mark.parametrize("name", ["bash", "execute_code"])
+def test_execution_tools_are_unavailable_when_absent_from_parent(name) -> None:
+    spec = _parse(required_tools=[name])
+    result = CapabilityResolver().resolve(spec, parent_tools={})
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.code == "REQUIRED_TOOL_NOT_FOUND"
+
+
+def test_python_status_is_an_explicit_read_only_capability() -> None:
+    spec = _parse(required_tools=["sandbox_status"])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.read_only is True
+    result = CapabilityResolver().resolve(spec, parent_tools={"sandbox_status": NamedTool("sandbox_status")})
+
+    assert isinstance(result, ResolvedCapabilityBundle)
+
+
+def test_python_execution_keeps_file_tool_write_scope_separate() -> None:
+    spec = _parse(required_tools=["execute_code", "write_file"], write_scope=["result.txt"])
+    result = CapabilityResolver().resolve(
+        spec, parent_tools={name: NamedTool(name) for name in ["execute_code", "write_file"]},
     )
-    assert isinstance(bash_with_broker, ResolvedCapabilityBundle)
+
+    assert isinstance(result, ResolvedCapabilityBundle)
 
 
 def test_explicit_web_extract_derives_network_capability() -> None:

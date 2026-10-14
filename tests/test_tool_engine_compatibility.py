@@ -1,8 +1,8 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
-descriptions, PPT entry contracts, tool handoffs, background retention and
-connector search apply before exact comparisons.
+descriptions, PPT entry contracts, tool handoffs, child execution, background
+retention and connector search apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -323,6 +323,20 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "sub_agent":
+            anchor = (
+                "`bash` is available only when named explicitly and every delegated "
+                "command requires one-shot parent-session approval. "
+            )
+            description = entry["schema"]["description"]
+            assert description.count(anchor) == 1
+            entry["schema"]["description"] = description.replace(
+                anchor,
+                "`bash` and `execute_code` may be named explicitly when the parent has them. "
+                "Bash uses the parent's existing permissions and approval rules; Python "
+                "uses a child-isolated kernel with the parent's runtime and workspace. "
+                "`sandbox_status` reports only this child's kernels. ",
+            )
         if tool.name == "bash":
             anchor = (
                 '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'

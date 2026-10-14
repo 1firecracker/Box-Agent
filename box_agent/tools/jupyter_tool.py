@@ -8,6 +8,7 @@ environment, so user-installed packages don't pollute the tool's dependencies.
 
 import asyncio
 import json
+import logging
 import os
 import platform
 import re
@@ -283,6 +284,7 @@ class SandboxEnvironment:
         else:
             self.python_path = self.venv_dir / "bin" / "python"
         self._ready = False
+        self._ready_lock = asyncio.Lock()
         self._bundled_override = False
         self.python_override_path: Path | None = None
 
@@ -315,6 +317,10 @@ class SandboxEnvironment:
         Args:
             on_progress: Optional callback(message: str) for progress updates.
         """
+        async with self._ready_lock:
+            await self._ensure_ready(on_progress)
+
+    async def _ensure_ready(self, on_progress: Any = None) -> None:
         if self._ready:
             return
 
@@ -942,8 +948,8 @@ class JupyterKernelSession:
         # Create KernelManager with our custom spec
         km = jupyter_client.KernelManager()
         km._kernel_spec = kernel_spec  # Override the kernel spec
-        await _start_sandbox_kernel(km)
         self._km = km
+        await _start_sandbox_kernel(km)
         # Register the kernel subprocess PID with the Windows kill-on-close Job
         # Object (no-op off-Windows). jupyter_client 8.x exposes the PID via
         # km.provisioner.pid (populated after start_kernel); older releases used
@@ -1391,6 +1397,34 @@ class JupyterSandboxTool(Tool):
         self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
+        self._requires_subprocess = False
+
+    def fork_for_child(self, child_id: str) -> "JupyterSandboxTool":
+        """Reuse runtime settings while isolating a trusted child's kernels."""
+        child = JupyterSandboxTool(
+            workspace_dir=self.workspace_dir,
+            runtime_env=self.runtime_env,
+            process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
+        )
+        child._requires_subprocess = True
+        return child
+
+    async def shutdown_owned_sessions(self) -> None:
+        """Stop only kernels in this tool's trusted owner namespace."""
+        if not self.process_owner_id:
+            raise ValueError("Kernel cleanup requires a trusted process owner.")
+        prefix = f"{self.process_owner_id}::"
+        for key in list(self._sessions):
+            if not key.startswith(prefix):
+                continue
+            session = self._sessions.pop(key)
+            try:
+                await session.stop()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Child kernel cleanup failed: %s", key, exc_info=True,
+                )
+        self._session_id = None
 
     @property
     def session_id(self) -> str | None:
@@ -1476,8 +1510,30 @@ class JupyterSandboxTool(Tool):
         if env._bundled_override:
             return JupyterKernelSession(session_id, workspace, env)
         if IS_FROZEN:
+            if self._requires_subprocess:
+                raise RuntimeError(
+                    "ISOLATED_KERNEL_UNAVAILABLE: child Python execution requires "
+                    "a standalone runtime Python (BOX_AGENT_SANDBOX_PYTHON)."
+                )
             return InProcessKernelSession(session_id, workspace)
         return JupyterKernelSession(session_id, workspace, env)
+
+    async def _start_session(
+        self, session_key: str, workspace: Path, env: SandboxEnvironment
+    ) -> "JupyterKernelSession | InProcessKernelSession":
+        session = self._create_session(session_key, workspace, env)
+        try:
+            await session.start()
+        except BaseException:
+            try:
+                await session.stop()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Kernel cleanup after startup failure failed: %s", session_key, exc_info=True,
+                )
+            raise
+        self._sessions[session_key] = session
+        return session
 
     @staticmethod
     def _execute_session_code(
@@ -1658,9 +1714,10 @@ Output formats:
             self._session_id = session_id
             session_key = self._session_key(session_id)
             workspace = self._get_workspace(session_key)
-            session = self._create_session(session_key, workspace, env)
-            await session.start()
-            self._sessions[session_key] = session
+            try:
+                await self._start_session(session_key, workspace, env)
+            except RuntimeError as e:
+                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}")
             return ToolResult(
                 success=False,
                 content="",
@@ -1670,16 +1727,14 @@ Output formats:
         # Get or create kernel session
         if session_key not in self._sessions:
             workspace = self._get_workspace(session_key)
-            session = self._create_session(session_key, workspace, env)
             try:
-                await session.start()
+                await self._start_session(session_key, workspace, env)
             except RuntimeError as e:
                 return ToolResult(
                     success=False,
                     content="",
                     error=f"KERNEL_START_FAILED: {e}",
                 )
-            self._sessions[session_key] = session
 
         session = self._sessions[session_key]
 
