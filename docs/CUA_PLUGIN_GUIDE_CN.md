@@ -22,6 +22,8 @@ RACCOON_CUA_DOWNLOAD_BASE_URL=https://cdn.example.com/computer-use/ box-agent in
 
 已有安装版本或签名校验失败时，`install-cua` 会重新下载到独立目录；新驱动通过验证后才切换安装记录，下载失败保留旧记录及文件。macOS CLI 的 LaunchServices 启动取消会清理尚未监听的自持进程；清理无法确认时保留待启动句柄和私有目录，供关闭时重试，不按应用名称停止其他进程。
 
+macOS CLI 会区分尚未确认的启动请求与已就绪的实例。已就绪 daemon 意外退出后，下一次 `ensure_cua_ready` 核对其精确进程和私有 endpoint 均不存在，再清理旧 socket 并启动替代实例；不能确认退出时仍保留清理责任，不删除活进程的 socket。未确认的 LaunchServices 请求继续等待并清理可能迟到的进程。
+
 ## 生命周期与 MCP 配置
 
 CLI 无需手写 CUA 的 `mcp.json`。启用 MCP 工具时，Box-Agent 默认注册 CUA 专用管理模块；模型先读取 computer-use Skill，再调用 `ensure_cua_ready`。该工具检查已安装驱动、按需启动独立 daemon，并连接私有 endpoint 上的 MCP 代理。未安装驱动时返回明确错误，不自动下载或授权。
@@ -190,3 +192,38 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 ### 如何完全关闭 CUA
 
 仅关闭图片输入可设置 `feed_screenshots: false` 或 `BOX_AGENT_CUA_VISION=false`。完全停用时，CLI 设置 `plugins.cua.runtime.enabled: false` 并退出当前进程、重新启动；桌面端关闭「桌面控制」开关。生命周期 owner 会清理自己启动的 daemon，不停止其他应用的实例。移除 `plugins.cua` 不会禁用默认管理模块。
+
+## MR 说明草稿（2026-10-13）
+
+建议标题：`feat(cua): add managed desktop runtime and CLI driver installation`
+
+### Task
+
+- CLI 默认注册 `ensure_cua_ready`，按需启动私有 daemon；external 模式仅连接 Electron 提供的 daemon，不启动备用实例、不停止宿主。
+- `install-cua` 显式安装固定版本驱动，支持配置 CDN 或默认官方源，两种宿主共享用户级资源目录，不将驱动二进制加入源码或 wheel。
+- 保留精确进程归属、启动取消及迟到进程清理保护，修复 macOS 已就绪 daemon 退出后的重新准备；补齐新增 Skill/tool 的严格兼容测试，未放宽其他工具的 schema 断言。
+- 不修改共享模型循环，不自动授权、自动下载或自动更新；未知图片能力仍不注入截图。
+
+### Proof
+
+在本仓库执行：
+
+```sh
+uv sync --frozen --all-extras
+uv run --frozen --no-sync python -m compileall -q box_agent
+uv run --frozen --no-sync pytest tests/ -q --tb=short --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server
+uv build --out-dir /private/tmp/box-agent-cua-fixed-review-20261013
+git diff --check
+```
+
+- 全量回归：6931 passed、293 skipped、1 deselected；耗时 342.52 秒。原 9 条 Skill/tool 基线失败与 1 条耗时断言本次均未失败。
+- 恢复、取消、Skill 清单及工具兼容聚焦测试：70 passed；仍保留待启动句柄清理超时、活 PID 状态查询失败等保护。
+- 有一条既有 `requests` 依赖版本兼容警告，没有测试失败。排除项来自仓库 Preflight，跳过项按测试自身条件执行，不计作实机通过。
+- 本说明是未提交工作区的本地验证记录，不是远程 `teamwork/local-ci` 状态；正式提交后必须对准确 Head 重新执行远程门禁。
+
+### Risk
+
+- 客户端必须配套包含这些源码的 Box-Agent standalone runtime；源码包/wheel 构建不是 standalone runtime 构建、安装、宿主重启或真实任务验收。
+- Windows/Linux 桌面输入、macOS 真机异常退出恢复仍需平台验收；本次新增回归使用受控 PID/endpoint，不运行用户应用。
+- 同名手写 CUA MCP 与托管配置冲突会禁用该服务；使用客户端开关或 CLI 管理配置，不并行维护旧手写定义。
+- 驱动固定版本且不内置，部署需提供可访问的官方源或可信 CDN；配置 CDN 后不会静默回退官方。撤销版本时应重建宿主 runtime，而非覆盖正在使用的驱动文件。

@@ -107,3 +107,81 @@ async def test_unsettled_launch_timeout_does_not_claim_cleanup_succeeded(adapter
     monkeypatch.setattr(module, "command", AsyncMock(return_value=(0, "")))
     await adapter.close_pending()
     assert adapter._pending_handle is None
+
+
+@pytest.mark.asyncio
+async def test_confirmed_daemon_exit_allows_readiness_to_launch_a_replacement(adapter, monkeypatch):
+    alive = False
+    launches = []
+    killed = []
+
+    async def command(*args):
+        nonlocal alive
+        if args[0] == "/usr/bin/open":
+            launches.append(args)
+            alive = True
+            return 0, ""
+        if args[0] == "/bin/ps":
+            own = f"333 {Path(adapter.driver).resolve()} serve --socket {adapter.endpoint}"
+            return 0, own if alive else ""
+        if args[1:3] == ("call", "check_permissions"):
+            return 0, '{"accessibility":true,"screen_recording":true}'
+        return 0, "Cua Driver daemon is running" if alive else "Cua Driver daemon is not running"
+
+    def stop(pid, sig):
+        nonlocal alive
+        killed.append(pid)
+        alive = False
+
+    monkeypatch.setattr(module, "command", command)
+    monkeypatch.setattr(module.os, "kill", stop)
+    manager = CuaRuntimeManager(
+        CuaRuntimeConfig(enabled=True, driver_path=adapter.driver),
+        probe=adapter.ready, start=adapter.start,
+    )
+    try:
+        assert (await manager.ensure_ready()).owned
+        first = manager._owned
+        assert first.launch_confirmed
+        Path(adapter.endpoint).write_text("stale owned socket")
+        alive = False  # The confirmed instance crashed, not a pending launch.
+        assert (await manager.ensure_ready()).owned
+        assert manager._owned is not first
+        assert len(launches) == 2
+        assert not Path(adapter.endpoint).exists()
+        assert killed == []
+    finally:
+        await manager.close()
+    assert killed == [333]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_daemon_with_failed_status_still_reaps_its_exact_pid(adapter, monkeypatch):
+    handle = module.DriverHandle(adapter)
+    handle.launch_requested = handle.launch_confirmed = True
+    monkeypatch.setattr(handle, "_mac_pid", AsyncMock(side_effect=[333, None]))
+    monkeypatch.setattr(adapter, "probe", AsyncMock(return_value=False))
+    killed = []
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: killed.append(pid))
+    Path(adapter.endpoint).write_text("owned socket")
+    await handle.close()
+    assert killed == [333]
+    assert not Path(adapter.endpoint).exists()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_daemon_shutdown_timeout_preserves_socket_for_retry(adapter, monkeypatch):
+    handle = module.DriverHandle(adapter)
+    handle.launch_requested = handle.launch_confirmed = True
+    monkeypatch.setattr(module, "_MAC_CLEANUP_TIMEOUT", .01)
+    monkeypatch.setattr(handle, "_mac_pid", AsyncMock(return_value=333))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(adapter, "probe", AsyncMock(return_value=False))
+    Path(adapter.endpoint).write_text("owned socket")
+    with pytest.raises(RuntimeError, match="retaining its private endpoint"):
+        await handle.close()
+    assert Path(adapter.endpoint).exists()
+    assert handle.launch_requested
+    monkeypatch.setattr(handle, "_mac_pid", AsyncMock(return_value=None))
+    await handle.close()
+    assert not Path(adapter.endpoint).exists()

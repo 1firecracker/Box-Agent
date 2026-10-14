@@ -98,6 +98,7 @@ class DriverAdapter:
                 )
             for _ in range(100):
                 if await self.probe(self.endpoint):
+                    handle.launch_confirmed = True
                     self._pending_handle = None  # Transferred to CuaRuntimeManager.
                     return handle
                 if handle.process and handle.process.returncode is not None:
@@ -130,6 +131,7 @@ class DriverHandle:
         self.endpoint = adapter.endpoint
         self.process = None
         self.launch_requested = False
+        self.launch_confirmed = False
 
     async def _mac_pid(self) -> int | None:
         # Match the exact executable AND fresh private endpoint, never an app
@@ -163,6 +165,11 @@ class DriverHandle:
                     code, output = await command(self.adapter.driver, "stop", "--socket", self.endpoint)
                     if code or await self.adapter.probe(self.endpoint):
                         raise RuntimeError(f"Owned CUA daemon did not stop: {output}")
+                    self.launch_requested = False
+                    return
+                elif self.launch_confirmed:
+                    # A previously observed instance has exited. Pending launch
+                    # intents must still wait for a late LaunchServices process.
                     self.launch_requested = False
                     return
                 await asyncio.sleep(.1)
