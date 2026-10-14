@@ -6,6 +6,28 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-14 — Transaction staging and truncation continuation (PR #212)
+
+- Change: [PR #212](https://github.com/Raccoon-Office/Box-Agent/pull/212),
+  merge `2fa4e969`, hardens the shared publication policy and loop guards.
+- Delivery boundary: inputs under the workspace-root `.box-agent-staging/`
+  stay internal across structured results, text references and workspace
+  discovery, even with a `type: artifact` sidecar. Only the transaction's
+  committed final destination is eligible for normal delivery and task/turn
+  registration; abort produces no artifact. See the [artifact contract](../ARTIFACT_PROTOCOL.md#explicit-publication-tool).
+- Continuation boundary: the existing runtime user-role request anchors to the
+  received tail without claiming to be a system message. A complete ASCII
+  marker or path on the last line suppresses the normal-stop truncation
+  heuristic; explicit `length` recovery and continuation limits are unchanged.
+- Compatibility: no ACP schema, configuration, dependency or data migration.
+  Historical task records are not repaired. Consuming hosts must rebuild,
+  install and restart their runtime; source proof alone is not desktop proof.
+- Proof anchors: `tests/test_publish_artifact_tool.py` (commit/abort, sidecar,
+  discovery and final task/turn ownership) and `tests/test_truncation_continuation.py`
+  (partial code, runtime injection and length-to-stop end markers).
+- Rollback: revert the PR's runtime fixes and protocol clarification, then
+  rebuild the consuming runtime; no data migration is required.
+
 ## 2026-10-12 — Shared credential turn reminders
 
 - [Credential reminder behavior and limits](2026-10-12-turn-credential-hints.md): shared CLI/ACP/SDK generation, fully masked passwords, environment-reference exclusion, utility opt-out and the plaintext input/log boundary. Default enabled; source validation does not update installed hosts.
@@ -80,6 +102,7 @@ decision, read those entries together.
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
 | Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
+| Artifact transaction inputs and truncated replies | `artifact_publication.py`, `tools/engine/artifact_results.py`, `publish_artifact_tool.py`, `.box-agent-staging`, `loop_guards.py`, `truncation_continuation_text` | Root staging inputs never become deliverables; final committed paths use normal ownership rules. Runtime user-role continuation follows the received tail; complete last-line ASCII markers/paths suppress normal-stop truncation retries. | Hardens existing publication and truncation recovery; explicit length recovery remains unchanged. | [PR #212 boundaries and proof](#2026-10-14--transaction-staging-and-truncation-continuation-pr-212) |
 | Tool name aliases | `Tool.aliases`, `build_tool_name_index`, OpenClaw, Hermes | Compatibility names are execution-only, use canonical Box-Agent argument schemas, and fail closed on conflicts. | Built-in mappings complete the generic alias mechanism in `fad2436`. | [2026-08-20 built-in aliases](#2026-08-20--built-in-tool-name-compatibility-aliases) |
 | Filesystem path resolution | `SearchFilesTool`, `path_candidates.py`, `PATH_NOT_FOUND`, ACP file-access prompt | Missing paths may return bounded structural candidates, but the model must retry a specific path and the permission engine remains final authority. | Hardens the broad-Home-search block without adding aliases or automatic authorization. | [2026-08-20 path candidates](#2026-08-20--bounded-structural-candidates-for-missing-filesystem-paths) |
 | Code-agent search | `ripgrep_tool.py`, `setup.py`, `session_mode`, `BOX_AGENT_RG`, `grep`, `glob` | In code-agent sessions with an available `rg`, bounded code search adds `grep`/`glob`; `search_files` remains available, including when `rg` is missing. | Additive tool contract; the consuming host must provide ripgrep separately. | [PR #175 code search](#2026-09-24--code-agent-ripgrep-search-pr-175) |
