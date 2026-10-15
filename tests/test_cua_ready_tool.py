@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -70,13 +70,56 @@ async def test_service_retains_pending_launch_and_directory_until_cleanup_retry_
     assert not directory.exists()
 
 
-def test_explicit_plugin_disable_wins_over_host_environment(monkeypatch):
+@pytest.mark.parametrize("enabled", [False, "false", 0, "off"])
+def test_explicit_plugin_disable_wins_over_host_environment(monkeypatch, enabled):
     monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", json.dumps({
         "enabled": True, "mode": "external", "endpoint": "/host/socket"}))
-    config = SimpleNamespace(plugins={"cua": {"runtime": {"enabled": False}}})
+    config = SimpleNamespace(plugins={"cua": {"runtime": {"enabled": enabled}}})
     service = create_cua_service(config)
     assert not service.config.enabled
     assert service.config.mode == "external"
+
+
+@pytest.mark.parametrize("setting", ["feed_screenshots", "persist_images"])
+def test_sessions_reuse_cua_runtime_with_independent_vision_settings(monkeypatch, setting):
+    runtime = CuaRuntimeConfig(
+        enabled=True, mode="external", driver_path="/trusted/driver", endpoint="/host/socket",
+    )
+    first = CuaService(CuaConfig(runtime=runtime))
+    second = CuaService(CuaConfig(runtime=runtime, **{setting: False}))
+    cleanup = Mock(wraps=second.adapter.cleanup)
+    monkeypatch.setattr(second.adapter, "cleanup", cleanup)
+    monkeypatch.setattr(loader, "_cua_service", None)
+    try:
+        assert loader.register_cua_service(first) is first
+        assert loader.register_cua_service(second) is first
+        assert getattr(first.settings, setting) is True
+        assert getattr(second.settings, setting) is False
+        cleanup.assert_called_once()
+    finally:
+        first.adapter.cleanup()
+        second.adapter.cleanup()
+
+
+@pytest.mark.parametrize("server_name,endpoint", [
+    ("another-desktop", "/host/socket"),
+    ("computer-use", "/another/socket"),
+])
+def test_sessions_reject_conflicting_cua_runtime_ownership(monkeypatch, server_name, endpoint):
+    first = CuaService(CuaConfig(runtime=CuaRuntimeConfig(
+        enabled=True, mode="external", driver_path="/trusted/driver", endpoint="/host/socket",
+    )))
+    second = CuaService(CuaConfig(server_name=server_name, runtime=CuaRuntimeConfig(
+        enabled=True, mode="external", driver_path="/trusted/driver", endpoint=endpoint,
+    )))
+    monkeypatch.setattr(loader, "_cua_service", None)
+    try:
+        loader.register_cua_service(first)
+        with pytest.raises(RuntimeError, match="CUA runtime is already registered"):
+            loader.register_cua_service(second)
+    finally:
+        first.adapter.cleanup()
+        second.adapter.cleanup()
 
 
 @pytest.mark.asyncio

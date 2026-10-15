@@ -75,7 +75,9 @@ def create_cua_service(config):
     host = os.environ.get("BOX_AGENT_CUA_RUNTIME_CONFIG", "").strip()
     if host:
         runtime = json.loads(host)
-        if raw and (raw.get("runtime") or {}).get("enabled") is False:
+        user_runtime = (raw or {}).get("runtime") or {}
+        user_enabled = CuaRuntimeConfig(enabled=user_runtime.get("enabled", True)).enabled
+        if not user_enabled:
             runtime["enabled"] = False
         settings = CuaConfig.model_validate({**(raw or {}), "runtime": runtime})
     elif raw is not None:

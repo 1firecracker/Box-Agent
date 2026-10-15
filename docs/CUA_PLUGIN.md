@@ -34,6 +34,8 @@ plugins:
 
 启用 `tools.enable_mcp` 时，即使没有 `plugins.cua` 命名空间，也会注册默认 CUA 管理模块及就绪工具；驱动未安装时返回安装提示，不自动下载或授权。CLI 默认 standalone，设置 `runtime.enabled: false` 可关闭。宿主通过可信环境变量 `BOX_AGENT_CUA_RUNTIME_CONFIG` 提供运行配置；用户显式禁用优先于宿主启用。省略 `runtime` 或填写 `null` 均接受宿主配置；没有宿主时采用 CLI 默认值。不要在模型参数或普通配置中复制桌面宿主的临时 endpoint。
 
+用户显式的 `runtime.enabled` 先按配置模型的布尔规则解析，再与宿主配置合并。同进程会话按服务名和 runtime 配置复用 CUA 服务，`feed_screenshots` 与 `persist_images` 仍由各会话独立决定。
+
 ## 启动链路
 
 启动时由显式的插件装配目录注册内置可选插件：
