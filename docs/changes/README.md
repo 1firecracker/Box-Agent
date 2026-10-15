@@ -54,6 +54,7 @@ of every commit.
 ## 2026-10-11 — Explicit JSON Pointer examples for query_jsonl
 
 - Tool and parameter descriptions explicitly require a leading `/` for both projections and filters, reject plain/hash/dotted field syntax, and include an executable example. Query execution, schema constraints, pagination and source-file safety are unchanged.
+- Parsed query results are not original source text. Verbatim-copy tasks are directed to read the matched source line with `read_file(offset=<record line>, limit=1)` instead of reserializing parsed values; a regression preserves whitespace, Unicode escapes and source bytes along this path.
 - Regression tests exercise the documented call and existing invalid-pointer rejection. Real-model ACP comparisons report intermediate pointer errors separately from final task success; small samples do not establish a general cost improvement.
 
 ## 2026-10-11 — External memory delegation and config-output safety

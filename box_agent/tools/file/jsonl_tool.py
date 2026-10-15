@@ -208,7 +208,10 @@ class JsonlQueryTool(ReadTool):
             "not 'id' or '#id'; use '/data/error' for a nested field. "
             'Example: {"path":"events.jsonl","fields":["/id","/data/error"],"where":{"/id":42}}. '
             "Results remain valid JSON; oversized values are replaced by "
-            "explicit summaries with original sizes. Continue with next_cursor until has_more "
+            "explicit summaries with original sizes. Results are parsed data, not original source text. "
+            "To copy a record verbatim, use read_file with offset set to the returned record's line "
+            "and limit=1, preserving its source text instead of reserializing data. "
+            "Continue with next_cursor until has_more "
             "is false. The source file is never modified."
         )
 
