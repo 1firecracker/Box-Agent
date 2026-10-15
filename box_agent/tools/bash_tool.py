@@ -1070,6 +1070,14 @@ class BashTool(Tool):
                 self._subprocess_env.pop(key, None)
             elif isinstance(value, str):
                 self._subprocess_env[key] = value
+        if not self.is_windows and isinstance(values.get("PATH"), str):
+            prefixes = (
+                values["PATH"].split(os.pathsep)
+                + self._subprocess_env.get("BOX_AGENT_SKILL_PATH_PREFIX", "").split(os.pathsep)
+            )
+            self._subprocess_env["BOX_AGENT_SKILL_PATH_PREFIX"] = os.pathsep.join(
+                dict.fromkeys(path for path in prefixes if path)
+            )
         if self.is_windows and "BOX_AGENT_BUNDLED_BASH" in values:
             self._refresh_windows_shell(self._subprocess_env)
 

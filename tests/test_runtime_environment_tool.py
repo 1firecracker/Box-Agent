@@ -247,6 +247,23 @@ def test_restored_python_invalidates_failed_environment_cache(tmp_path, monkeypa
     assert after._bundled_override
 
 
+def test_runtime_path_refresh_replaces_cached_python_environment(tmp_path, monkeypatch):
+    python = tmp_path / "python"
+    python.touch()
+    monkeypatch.setattr(JupyterSandboxTool, "_sandbox_env", None)
+    monkeypatch.setattr(JupyterSandboxTool, "_sandbox_env_key", None)
+    tool = JupyterSandboxTool(runtime_env={
+        "BOX_AGENT_SANDBOX_PYTHON": str(python), "PATH": "before-install",
+    })
+    before = tool._get_sandbox_env()
+    tool.update_runtime_env({"PATH": "after-install", "BOX_AGENT_NODE": "/managed/node"})
+    after = tool._get_sandbox_env()
+    assert after is not before
+    assert after.python_path == before.python_path
+    assert after._subprocess_env()["PATH"] == "after-install"
+    assert after._subprocess_env()["BOX_AGENT_NODE"] == "/managed/node"
+
+
 @pytest.mark.asyncio
 async def test_python_preparation_success_continues_same_call(monkeypatch, tmp_path):
     tool = JupyterSandboxTool()

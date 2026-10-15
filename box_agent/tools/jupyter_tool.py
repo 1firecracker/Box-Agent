@@ -102,15 +102,17 @@ async def _start_sandbox_kernel(
     kernel_manager: Any,
     *,
     timeout: float = 30,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     """Start a Jupyter kernel without blocking the host event loop forever."""
     async_start = getattr(kernel_manager, "_async_start_kernel", None)
+    start_kwargs = {"env": dict(env)} if env is not None else {}
     try:
         if callable(async_start):
-            await asyncio.wait_for(async_start(), timeout=timeout)
+            await asyncio.wait_for(async_start(**start_kwargs), timeout=timeout)
         else:
             await asyncio.wait_for(
-                asyncio.to_thread(kernel_manager.start_kernel),
+                asyncio.to_thread(kernel_manager.start_kernel, **start_kwargs),
                 timeout=timeout,
             )
     except asyncio.TimeoutError as exc:
@@ -499,13 +501,15 @@ class SandboxEnvironment:
         "pip": "pip",
     }
 
-    def _subprocess_env(self) -> dict[str, str] | None:
+    def _subprocess_env(self, *, for_kernel: bool = False) -> dict[str, str] | None:
         """Build env for subprocess pip/import checks.
 
         When a host python override is in use we prepend RUNTIME_PACKAGES_DIR
         to PYTHONPATH so fallback-installed packages are importable.
+        Kernel launches reuse runtime values while leaving fallback packages
+        to the kernel spec.
         """
-        if not self._bundled_override:
+        if not self._bundled_override and not for_kernel:
             return None
         env = os.environ.copy()
         env.pop("BOX_AGENT_OUTPUT_DIR", None)
@@ -514,9 +518,10 @@ class SandboxEnvironment:
             env.pop("PYTHONPATH", None)
             env.pop("PYTHONHOME", None)
             return env
-        extra = str(RUNTIME_PACKAGES_DIR)
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
+        if not for_kernel:
+            extra = str(RUNTIME_PACKAGES_DIR)
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
         return env
 
     async def _verify_packages(self, on_progress: Any = None) -> None:
@@ -967,7 +972,7 @@ class JupyterKernelSession:
         km = jupyter_client.KernelManager()
         km._kernel_spec = kernel_spec  # Override the kernel spec
         self._km = km
-        await _start_sandbox_kernel(km)
+        await _start_sandbox_kernel(km, env=self.sandbox_env._subprocess_env(for_kernel=True))
         # Register the kernel subprocess PID with the Windows kill-on-close Job
         # Object (no-op off-Windows). jupyter_client 8.x exposes the PID via
         # km.provisioner.pid (populated after start_kernel); older releases used
@@ -1459,6 +1464,7 @@ class JupyterSandboxTool(Tool):
         cached = self.__class__._sandbox_env
         if cached is not None and (
             self.__class__._sandbox_env_key != self._sandbox_env_cache_key()
+            or cached.runtime_env != self.runtime_env
             or (
                 not cached._bundled_override
                 and SandboxEnvironment._resolve_python_override(self.runtime_env)

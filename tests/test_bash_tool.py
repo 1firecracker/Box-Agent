@@ -1540,6 +1540,39 @@ def test_login_shell_reapplies_box_agent_skill_path_prefix():
     assert "npm_config_cache" not in tool._subprocess_env
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX login shell")
+@pytest.mark.asyncio
+async def test_host_path_refresh_survives_login_profile_path_reset(tmp_path, monkeypatch):
+    runtime_bin = tmp_path / "managed" / "bin"
+    runtime_bin.mkdir(parents=True)
+    node = runtime_bin / "node"
+    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    node.chmod(0o755)
+    login = tmp_path / "login-shell"
+    login.write_text(
+        '#!/bin/sh\nif [ "$1" = "-l" ]; then shift; fi\n'
+        'PATH=/usr/bin:/bin\nexport PATH\nexec /bin/bash "$@"\n',
+        encoding="utf-8",
+    )
+    login.chmod(0o755)
+    tool = BashTool(runtime_env={"BOX_AGENT_SKILL_PATH_PREFIX": str(tmp_path / "old-bin")})
+    monkeypatch.setattr(tool, "_login_shell", str(login))
+    monkeypatch.setattr(tool, "_use_login_shell", True)
+    tool.update_runtime_env({
+        "PATH": str(runtime_bin) + os.pathsep + "/usr/bin:/bin",
+        "BOX_AGENT_NODE": str(node),
+    })
+    proc = await tool._create_subprocess("command -v node")
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        assert proc.returncode == 0
+        assert stdout.decode().strip() == str(node)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
 @pytest.mark.asyncio
 async def test_foreground_timeout_kills_grandchild_process(tmp_path):
     """B4 regression: a foreground timeout must tear down the whole process

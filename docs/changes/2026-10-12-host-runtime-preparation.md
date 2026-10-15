@@ -26,6 +26,11 @@ wait timeout reports that installation may still be running; inspect status next
 Delegated Python execution borrows the parent's host readiness check and refreshes
 the child's managed runtime paths after it succeeds. Child kernels retain their
 own owner namespaces, and concurrent initialization keeps the shared readiness lock.
+Changes to Node/browser paths also invalidate a cached Python environment when the
+Python executable stays the same. New kernels receive the refreshed environment at
+process launch, without persisting the host process environment in kernel.json.
+Unix shells replay the refreshed host PATH after login profiles so standard runtime
+commands keep the managed executable precedence.
 
 Office Desktop retains its startup download plan and paths. Explicit tool `ensure`
 only supplements the requested capability and its packages, sharing the startup

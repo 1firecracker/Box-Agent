@@ -238,6 +238,41 @@ async def test_real_selected_python_executes_and_retains_variables_without_host(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_child_kernel_receives_refreshed_host_environment(tmp_path, monkeypatch, explicit):
+    import sys
+
+    pytest.importorskip("ipykernel")
+    monkeypatch.setattr(jupyter, "SANDBOX_BASE_DIR", tmp_path / "sandbox")
+    monkeypatch.setattr(jupyter, "RUNTIME_PACKAGES_DIR", tmp_path / "packages")
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sessions", {})
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env", None)
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env_key", None)
+    monkeypatch.setattr(jupyter.SandboxEnvironment, "_verify_packages", AsyncMock())
+    parent = jupyter.JupyterSandboxTool(
+        workspace_dir=str(tmp_path / "workspace"),
+        runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
+        process_owner_id="parent",
+    )
+    parent._get_sandbox_env()
+    node = str(tmp_path / "managed-node")
+    parent.update_runtime_env({"BOX_AGENT_NODE": node})
+    child = parent.fork_for_child("child")
+    try:
+        result = await child.execute(
+            "import os\nprint(os.environ.get('BOX_AGENT_NODE', 'missing-runtime'))",
+            session_id="runtime",
+            **({"python_path": sys.executable} if explicit else {}),
+        )
+        assert result.success, result.error
+        assert node in result.content
+        spec = tmp_path / "sandbox" / "kernelspec" / "box-agent-sandbox" / "kernel.json"
+        assert "BOX_AGENT_NODE" not in spec.read_text()
+    finally:
+        await child.shutdown_owned_sessions()
+
+
+@pytest.mark.asyncio
 async def test_explicit_missing_interpreter_never_resolves_host_fallback(tmp_path):
     host = tmp_path / "host.exe"
     host.touch()
