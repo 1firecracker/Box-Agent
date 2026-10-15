@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..base import ToolResult
-from .read_tool import ReadTool
+from .read_tool import MAX_READ_CHARS, ReadTool
 
 
 DEFAULT_JSONL_LIMIT = 20
@@ -209,8 +209,11 @@ class JsonlQueryTool(ReadTool):
             'Example: {"path":"events.jsonl","fields":["/id","/data/error"],"where":{"/id":42}}. '
             "Results remain valid JSON; oversized values are replaced by "
             "explicit summaries with original sizes. Results are parsed data, not original source text. "
-            "To copy a record verbatim, use read_file with offset set to the returned record's line "
-            "and limit=1, preserving its source text instead of reserializing data. "
+            f"For source lines within read_file's {MAX_READ_CHARS:,}-character output limit "
+            "(including the newline), copy verbatim with offset set to the returned record's line "
+            "and limit=1. If a one-line read exceeds that limit, use another permitted file-copy "
+            "method without printing the record, or report the limit; do not reserialize query "
+            "data as the original text. "
             "Continue with next_cursor until has_more "
             "is false. The source file is never modified."
         )

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from box_agent.tools.file.jsonl_tool import JsonlQueryTool
-from box_agent.tools.file.read_tool import ReadTool
+from box_agent.tools.file.read_tool import MAX_READ_CHARS, ReadTool
 
 
 async def test_query_jsonl_documented_call_filters_and_projects_nested_fields(tmp_path):
@@ -45,6 +45,36 @@ async def test_query_jsonl_line_location_can_retrieve_verbatim_source_record(tmp
     )
     assert read.success is True
     assert f"2|{source_line}" in read.content
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "record_chars,can_read", [(MAX_READ_CHARS, True), (MAX_READ_CHARS + 1, False)],
+)
+async def test_query_jsonl_locates_records_on_both_sides_of_raw_read_limit(
+    tmp_path, record_chars, can_read,
+):
+    prefix, suffix = '{"id":42,"payload":"', '"}\n'
+    original = (prefix + "x" * (record_chars - len(prefix) - len(suffix)) + suffix).encode()
+    source = tmp_path / "events.jsonl"
+    source.write_bytes(original)
+    query = await JsonlQueryTool(workspace_dir=str(tmp_path)).execute(
+        path="events.jsonl", fields=["/id"], where={"/id": 42},
+    )
+
+    assert query.success is True
+    record = json.loads(query.content)["records"][0]
+    assert record["data"] == {"/id": 42}
+    read = await ReadTool(workspace_dir=str(tmp_path)).execute(
+        path="events.jsonl", offset=record["line"], limit=1,
+    )
+
+    assert read.success is can_read
+    if can_read:
+        assert f"1|{original.decode().rstrip()}" in read.content
+    else:
+        assert read.content == ""
+        assert "safety limit" in read.error
     assert source.read_bytes() == original
 
 
