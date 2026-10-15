@@ -1832,6 +1832,8 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
     from box_agent.config import ToolLimitsConfig
     from box_agent.tools.file_tools import SearchFilesTool
 
+    # A cold tokenizer may download its vocabulary; exclude test setup from batch timing.
+    encoding = tiktoken.get_encoding("cl100k_base")
     paths = []
     for index in range(20):
         path = tmp_path / f"project-{index:02d}.md"
@@ -1860,7 +1862,6 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
             self.messages = messages
             self.tools = tools
             self.generate_kwargs = kwargs
-            encoding = tiktoken.get_encoding("cl100k_base")
             prompt_tokens = sum(
                 len(encoding.encode(str(message.content))) for message in messages
             )
