@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -1549,9 +1550,10 @@ async def test_web_search_tool_emits_reference_event():
     from box_agent.schema import FunctionCall, ToolCall
 
     call_num = 0
+    model_reference = None
 
     async def fake_stream(*, messages, tools, **kwargs):
-        nonlocal call_num
+        nonlocal call_num, model_reference
         call_num += 1
         if call_num == 1:
             yield StreamEvent(
@@ -1566,7 +1568,12 @@ async def test_web_search_tool_emits_reference_event():
                 ],
             )
         else:
-            yield StreamEvent(type="text", delta="summary [ref_1]")
+            tool_message = next(
+                message for message in messages
+                if message.role == "tool" and message.tool_call_id == "search-1"
+            )
+            model_reference = json.loads(tool_message.content)["refs"][0]["reference_tag"]
+            yield StreamEvent(type="text", delta=f"summary [{model_reference}]")
             yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
 
     llm = AsyncMock()
@@ -1584,7 +1591,12 @@ async def test_web_search_tool_emits_reference_event():
     web_events = [event for event in events if isinstance(event, WebSearchEvent)]
     assert len(web_events) == 1
     assert web_events[0].tool_call_id == "search-1"
-    assert web_events[0].payload["refs"][0]["reference_tag"] == "ref_1"
+    reference = web_events[0].payload["refs"][0]
+    assert reference["reference_tag"].startswith("ref_web_")
+    assert reference["reference_tag"] == model_reference
+    assert reference["url"] == "https://example.com"
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.final_content == f"summary [{model_reference}]"
 
 
 async def test_sub_agent_forwards_web_search_reference_event():
@@ -1592,9 +1604,10 @@ async def test_sub_agent_forwards_web_search_reference_event():
     from box_agent.schema import FunctionCall, ToolCall
 
     call_num = 0
+    model_reference = None
 
     async def fake_stream(*, messages, tools, **kwargs):
-        nonlocal call_num
+        nonlocal call_num, model_reference
         call_num += 1
         if call_num == 1:
             yield StreamEvent(
@@ -1609,7 +1622,12 @@ async def test_sub_agent_forwards_web_search_reference_event():
                 ],
             )
         else:
-            yield StreamEvent(type="text", delta="child summary [ref_1]")
+            tool_message = next(
+                message for message in messages
+                if message.role == "tool" and message.tool_call_id == "child-search-1"
+            )
+            model_reference = json.loads(tool_message.content)["refs"][0]["reference_tag"]
+            yield StreamEvent(type="text", delta=f"child summary [{model_reference}]")
             yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
 
     llm = AsyncMock()
@@ -1639,7 +1657,11 @@ async def test_sub_agent_forwards_web_search_reference_event():
     assert len(web_events) == 1
     assert web_events[0].parent_tool_call_id == "parent-sub-agent"
     assert web_events[0].sub_agent_id.startswith("subagent-")
-    assert web_events[0].event.payload["refs"][0]["url"] == "https://example.com"
+    reference = web_events[0].event.payload["refs"][0]
+    assert reference["url"] == "https://example.com"
+    assert reference["reference_tag"].startswith("ref_web_")
+    assert reference["reference_tag"] == model_reference
+    assert result.content == f"child summary [{model_reference}]"
 
 
 async def test_sub_agent_web_extract_uses_child_model_context(monkeypatch):
@@ -1810,6 +1832,8 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
     from box_agent.config import ToolLimitsConfig
     from box_agent.tools.file_tools import SearchFilesTool
 
+    # A cold tokenizer may download its vocabulary; exclude test setup from batch timing.
+    encoding = tiktoken.get_encoding("cl100k_base")
     paths = []
     for index in range(20):
         path = tmp_path / f"project-{index:02d}.md"
@@ -1838,7 +1862,6 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
             self.messages = messages
             self.tools = tools
             self.generate_kwargs = kwargs
-            encoding = tiktoken.get_encoding("cl100k_base")
             prompt_tokens = sum(
                 len(encoding.encode(str(message.content))) for message in messages
             )

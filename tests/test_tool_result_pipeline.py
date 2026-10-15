@@ -518,3 +518,118 @@ async def test_incomplete_post_scan_still_publishes_explicit_tool_files(
         "report.txt",
     ]
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+@pytest.mark.parametrize("result_key", ["WebResults", "Documents", "ProviderRows"])
+def test_search_citations_match_model_and_events_across_repeated_local_ranks(tmp_path, result_key):
+    from box_agent.events import WebSearchEvent
+
+    messages = []
+    tags = []
+    for index, url in enumerate(["https://example.com/one", "https://example.com/two", "https://example.com/one"]):
+        content = json.dumps({"Result": {result_key: [{
+            "SortId": 1, "Title": "Source", "Url": url,
+        }]}, "SearchStatus": "ok"})
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"search-{index}", tool_name="web_search",
+            arguments={}, result=ToolResult(success=True, content=content),
+            visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+        ))
+        event = next(event for event in outcome.events if isinstance(event, WebSearchEvent))
+        ref = event.payload["refs"][0]
+        tags.append(ref["reference_tag"])
+        assert ref["url"] == url
+        assert ref["reference_tag"] in outcome.tool_message.content
+        assert "Never invent or renumber" in outcome.tool_message.content
+        assert json.loads(outcome.visible_content)["SearchStatus"] == "ok"
+    assert tags[0] != tags[1]
+    assert tags[0] == tags[2]
+    assert all(tag.startswith("ref_web_") for tag in tags)
+
+
+@pytest.mark.parametrize("result_key", ["Documents", "ProviderRows"])
+@pytest.mark.parametrize("model_context", [None, "Independent search summary"])
+def test_global_sources_bind_every_model_reference_to_the_event(tmp_path, result_key, model_context):
+    from box_agent.events import WebSearchEvent
+    from box_agent.tools.web_search_runtime import _dedupe_web_search_content
+
+    sources = [
+        {
+            "Rank": 0, "Title": "First", "Url": "https://example.com/first",
+            "Snippet": [
+                {"Type": "text", "Text": "Original passage"},
+                {"Type": "image", "Image": {
+                    "ImageUrl": "https://cdn.example.com/first.jpg?signature=a%2Bb",
+                    "Width": 1600, "Height": 900, "Alt": "First image",
+                }},
+            ],
+            "DocumentInfo": {"PublishTime": "2026-10-14", "Filetype": "image"},
+        },
+        {"Rank": 1, "Title": "Second", "Url": "https://example.com/second"},
+    ]
+    args = {"query": "first second"}
+    raw = json.dumps({"ResponseMetadata": {"RequestId": "request"}, "Result": {result_key: sources}})
+    content = _dedupe_web_search_content(raw, set(), args)[0]
+    outcome = process_tool_result(ToolResultPipelineInput(
+        messages=[], tool_call_id="global-search", tool_name="web_search", arguments=args,
+        result=ToolResult(success=True, content=content, model_context=model_context),
+        visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+    ))
+    event = next(event for event in outcome.events if isinstance(event, WebSearchEvent))
+    refs = event.payload["refs"]
+    assert len(refs) == 2
+    event_links = {ref["reference_tag"]: ref["url"] for ref in refs}
+    assert len(event_links) == 2
+    assert all(tag.startswith("ref_web_") for tag in event_links)
+    visible = json.loads(outcome.visible_content)
+    rows = visible["Result"][result_key]
+    assert [{key: value for key, value in row.items() if key != "reference_tag"} for row in rows] == sources
+    assert visible["ResponseMetadata"] == {"RequestId": "request"}
+    assert {row["reference_tag"]: row["Url"] for row in rows} == event_links
+    if model_context:
+        assert outcome.model_content.startswith(model_context + "\n\n")
+        model_refs = json.loads(outcome.model_content.split("\n\n", 1)[1])["refs"]
+        assert {ref["reference_tag"]: ref["url"] for ref in model_refs} == event_links
+    else:
+        model_rows = json.loads(outcome.model_content)["Result"][result_key]
+        assert {row["reference_tag"]: row["Url"] for row in model_rows} == event_links
+    first = next(ref for ref in refs if ref["url"] == sources[0]["Url"])
+    assert first["passage"] == "Original passage"
+    assert first["image_details"][0] == {
+        "url": "https://cdn.example.com/first.jpg?signature=a%2Bb",
+        "width": 1600, "height": 900, "alt": "First image",
+    }
+
+
+@pytest.mark.parametrize("result_key", ["Documents", "ProviderRows"])
+def test_global_search_replies_remove_seen_rows_without_reintroducing_numeric_tags(tmp_path, result_key):
+    from box_agent.events import WebSearchEvent
+
+    seen = set()
+    messages = []
+    for index, (names, expected) in enumerate([
+        (["first", "second"], ["first", "second"]),
+        (["second", "third"], ["third"]),
+        (["first", "third"], []),
+    ]):
+        content = json.dumps({"Result": {result_key: [
+            {"Rank": rank, "Title": name, "Url": f"https://example.com/{name}"}
+            for rank, name in enumerate(names)
+        ]}})
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"search-{index}", tool_name="web_search",
+            arguments={"query": "example"}, result=ToolResult(success=True, content=content),
+            visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+            web_search_seen_result_keys=seen,
+        ))
+        rows = json.loads(outcome.visible_content)["Result"][result_key]
+        assert [row["Title"] for row in rows] == expected
+        assert outcome.web_search_new_results == len(expected)
+        events = [event for event in outcome.events if isinstance(event, WebSearchEvent)]
+        if not expected:
+            assert events == []
+            continue
+        assert len(events) == 1
+        links = {ref["reference_tag"]: ref["url"] for ref in events[0].payload["refs"]}
+        assert {row["reference_tag"]: row["Url"] for row in rows} == links
+        assert all(tag.startswith("ref_web_") for tag in links)
