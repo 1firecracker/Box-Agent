@@ -475,6 +475,8 @@ uv run pytest --cov              # with coverage
 
 ## Troubleshooting
 
+**Model quota or arrearage**: Recognized business error codes such as `Arrearage` determine the error category before generic message text. HTTP status remains a separate diagnostic and retry signal; unknown codes fall back to the existing text rules. Check the account balance and billing status for the configured model provider before retrying.
+
 **SSL Certificate Error**: `pip install --upgrade certifi` or set `verify=False` for testing.
 
 **Module Not Found**: Make sure you're in the project directory: `cd Box-Agent && uv run python -m box_agent.cli`
