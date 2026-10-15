@@ -5,7 +5,9 @@
 
 CUA 是可选插件。Box-Agent 核心只读取并保留通用的 `plugins` 命名空间，具体字段由 CUA 插件自己校验；核心 `tools` 配置不包含 `cua` 字段。
 
-安装指南以 CuaDriver **0.32.0** 的独立 App / MCP 模式为基线：`mcp.json` 的 command 为 `/Applications/CuaDriver.app/Contents/MacOS/cua-driver`，args 为 `["mcp"]`，示例服务名为 `cua-computer-use`。安装 Driver、配置 MCP 和启用插件是三个独立步骤。
+当前托管安装器固定使用 CuaDriver **0.28.2**。CLI 通过 `box-agent install-cua` 安装驱动，由 `ensure_cua_ready` 按需启动自持 daemon 并连接 MCP；桌面客户端负责安装、权限和 embedded daemon，Box-Agent 以 external 模式连接宿主提供的私有 endpoint。驱动不随 Python 包携带，两端共享 `~/.box-agent/resources/cua-driver/` 下的已验证资源，但不共享权限和 daemon 所有权。
+
+历史 0.32.0 独立 App / 手工 MCP 配置及验收记录不代表当前托管模式。不要直接复用旧的 `args: ["mcp"]` 配置；迁移方法见下文。
 
 ## 配置示例
 
@@ -18,16 +20,21 @@ image_input: true
 
 plugins:
   cua:
-    server_name: "cua-computer-use"
+    server_name: "computer-use"
     feed_screenshots: true
     persist_images: true
+    runtime:
+      enabled: true
+      mode: standalone
 ```
 
 `Config.from_yaml()` 会把每个 `plugins.<name>` 保留为一个映射，不解释未知插件的字段。CUA 插件激活时再校验自己的命名空间：`server_name` 默认是 `computer-use`，`feed_screenshots` 和 `persist_images` 默认是 `true`，未知字段会被拒绝。`persist_images` 控制会话图片 sidecar，与模型是否支持图片及视觉输入开关独立。
 
-示例显式覆盖默认服务名，必须与 `mcp.json` 的键名一致。`image_input` 是顶层模型能力声明，只对确认支持图片的模型开启。
+示例使用默认服务名，无需手写 CUA 的 `mcp.json`。`image_input` 是顶层模型能力声明，只对确认支持图片的模型开启。
 
-没有 `plugins.cua` 命名空间时，虽然 bundled catalog 可以发现插件，CUA 运行绑定保持关闭；只有配置该命名空间后才会在对应 run 中启用。
+启用 `tools.enable_mcp` 时，即使没有 `plugins.cua` 命名空间，也会注册默认 CUA 管理模块及就绪工具；驱动未安装时返回安装提示，不自动下载或授权。CLI 默认 standalone，设置 `runtime.enabled: false` 可关闭。宿主通过可信环境变量 `BOX_AGENT_CUA_RUNTIME_CONFIG` 提供运行配置；用户显式禁用优先于宿主启用。省略 `runtime` 或填写 `null` 均接受宿主配置；没有宿主时采用 CLI 默认值。不要在模型参数或普通配置中复制桌面宿主的临时 endpoint。
+
+用户显式的 `runtime.enabled` 先按配置模型的布尔规则解析，再与宿主配置合并。同进程会话按服务名和 runtime 配置复用 CUA 服务，`feed_screenshots` 与 `persist_images` 仍由各会话独立决定。
 
 ## 启动链路
 
@@ -36,6 +43,8 @@ plugins:
 ```text
 Config.from_yaml()
   -> Config.plugins（核心只做通用 YAML 透传）
+  -> initialize_base_tools（启用 MCP 时注册 CUA service / ensure_cua_ready）
+  -> create_cua_service（叠加可信宿主配置，写回规范化 plugins.cua）
   -> plugins/catalog.py（显式登记 CUA）
   -> PluginRuntime（默认包含 bundled plugins）
   -> PluginSession.open_run()
@@ -44,7 +53,15 @@ Config.from_yaml()
 
 需要完全排除可选内置插件的宿主可以构造 `PluginRuntime(include_bundled_plugins=False)`；这不会影响核心内置插件。
 
-CUA 仍然需要在 `mcp.json` 中配置对应的 MCP 服务；插件启动后会通过已有的 MCP exposure manager 自动激活该 `server_name` 下已发现的工具，不需要模型先调用 `tool_search`。MCP 连接仍由既有 loader 负责，若服务尚未连接，插件不会绕过 loader 自己创建第二条连接。
+模型先读取 computer-use Skill，再调用 `ensure_cua_ready` 准备 daemon 和连接 MCP，之后使用 `tool_search` 发现动作工具。MCP 连接仍由既有 loader 负责，插件不创建第二条连接。external 模式只检查并连接宿主，不启动备用 daemon；关闭时也不停止宿主实例。
+
+### 从手工 MCP 配置迁移
+
+1. 结束旧桌面任务，退出 CLI / ACP 宿主；由原 owner 停止旧 daemon。
+2. 移除与 `plugins.cua.server_name` 同名的旧手工 MCP entry，改用托管配置；若要从 `cua-computer-use` 改回默认名，同时清除旧服务，避免重复连接。保留其他 MCP 服务。
+3. CLI 运行 `box-agent install-cua` 并按提示授权；桌面端使用客户端安装、授权及开关流程，再重启消费它的宿主。
+
+同名 entry 与托管定义不一致时，该 CUA 服务会因冲突被禁用，其他 MCP 不受影响；显式 `disabled: true` 始终优先，恢复能力需先解除禁用。不要同时叠加旧手工模式与新托管模式。
 
 ## MCP 结构化结果
 

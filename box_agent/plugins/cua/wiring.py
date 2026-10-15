@@ -134,9 +134,11 @@ class CuaBindings:
             return None
         if structured_content is None:
             return None
+        from .structured_result import cua_structured_payload
+
         context = "CUA structured result: " + json.dumps({
             "server": server_name, "tool": remote_name,
-            "arguments": arguments, "structuredContent": structured_content,
+            "arguments": arguments, "structuredContent": cua_structured_payload(structured_content),
         }, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         if isinstance(structured_content.get("elements"), list):
             context += "\n" + _OBSERVATION_GUIDANCE
