@@ -178,6 +178,49 @@ async def test_rejects_oversized_command_before_execution():
 
 
 @pytest.mark.asyncio
+async def test_windows_existing_tool_refreshes_shell_after_host_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    binary = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={
+        "BOX_AGENT_BUNDLED_BASH": str(binary), "PATH": "",
+    })
+    spawn = unittest.mock.AsyncMock()
+    monkeypatch.setattr(bash_tool_module.asyncio, "create_subprocess_exec", spawn)
+    await tool._create_subprocess("Write-Output OK")
+    assert spawn.call_args.args[0].lower().endswith(r"\windowspowershell\v1.0\powershell.exe")
+    assert bash_tool_module.ntpath.isabs(spawn.call_args.args[0])
+    assert tool.shell_name == "PowerShell"
+
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test fixture; never executed")
+    tool.update_runtime_env({"BOX_AGENT_BUNDLED_BASH": str(binary), "PATH": "new-path"})
+    assert tool.shell_name == "bash"
+    assert "bash command" in tool.parameters["properties"]["command"]["description"].lower()
+    await tool._create_subprocess("printf OK")
+    assert spawn.call_args.args[:2] == (str(binary), "-c")
+    assert str(binary.parent) in spawn.call_args.kwargs["env"]["PATH"]
+    assert "new-path" in spawn.call_args.kwargs["env"]["PATH"]
+
+    # A host refresh reporting a missing executable must not retain the old selection.
+    tool.update_runtime_env({"BOX_AGENT_BUNDLED_BASH": str(tmp_path / "missing.exe")})
+    assert tool.shell_name == "PowerShell"
+    await tool._create_subprocess("Write-Output OK")
+    assert spawn.call_args.args[0] == tool._powershell_executable
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell integration")
+@pytest.mark.asyncio
+async def test_windows_powershell_starts_with_empty_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={"PATH": "", "BOX_AGENT_BUNDLED_BASH": ""})
+    process = await tool._create_subprocess("Write-Output 'POWERSHELL_OK'")
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+    assert process.returncode == 0, stderr
+    assert b"POWERSHELL_OK" in stdout
+
+
+@pytest.mark.asyncio
 async def test_foreground_command():
     """Test executing a simple foreground command."""
     print("\n=== Testing Foreground Command ===")
@@ -1352,6 +1395,9 @@ def test_posix_description_uses_injected_python_and_reserved_scratch_directory(m
 
     assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
     assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
+    assert "Use only application-managed Python, Node and Git" in description
+    assert "otherwise prepare the managed Python through local_environment" in description
+    assert "otherwise check for an available Python executable" not in description
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
 
@@ -1492,6 +1538,39 @@ def test_login_shell_reapplies_box_agent_skill_path_prefix():
     assert wrapped.endswith("command -v npm")
     assert "npm_config_prefix" not in tool._subprocess_env
     assert "npm_config_cache" not in tool._subprocess_env
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX login shell")
+@pytest.mark.asyncio
+async def test_host_path_refresh_survives_login_profile_path_reset(tmp_path, monkeypatch):
+    runtime_bin = tmp_path / "managed" / "bin"
+    runtime_bin.mkdir(parents=True)
+    node = runtime_bin / "node"
+    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    node.chmod(0o755)
+    login = tmp_path / "login-shell"
+    login.write_text(
+        '#!/bin/sh\nif [ "$1" = "-l" ]; then shift; fi\n'
+        'PATH=/usr/bin:/bin\nexport PATH\nexec /bin/bash "$@"\n',
+        encoding="utf-8",
+    )
+    login.chmod(0o755)
+    tool = BashTool(runtime_env={"BOX_AGENT_SKILL_PATH_PREFIX": str(tmp_path / "old-bin")})
+    monkeypatch.setattr(tool, "_login_shell", str(login))
+    monkeypatch.setattr(tool, "_use_login_shell", True)
+    tool.update_runtime_env({
+        "PATH": str(runtime_bin) + os.pathsep + "/usr/bin:/bin",
+        "BOX_AGENT_NODE": str(node),
+    })
+    proc = await tool._create_subprocess("command -v node")
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        assert proc.returncode == 0
+        assert stdout.decode().strip() == str(node)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
 
 @pytest.mark.asyncio

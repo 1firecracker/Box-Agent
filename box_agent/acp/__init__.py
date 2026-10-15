@@ -1746,6 +1746,7 @@ class BoxACPAgent:
         follow_up_suggestions_enabled = False
         skillhub_search_enabled = False
         skillhub_install_enabled = False
+        runtime_environment_enabled = False
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
@@ -1790,6 +1791,7 @@ class BoxACPAgent:
                 "hostCapabilities"
             )
             if isinstance(host_capabilities, dict):
+                runtime_environment_enabled = host_capabilities.get("runtime_environment") == 1
                 raw_skillhub_search = host_capabilities.get(
                     "skillhub_search",
                     host_capabilities.get("skillhubSearch"),
@@ -2007,6 +2009,20 @@ class BoxACPAgent:
 
         # RPC tools are host bindings; session tools and prompt are prepared by plugins.
         tools: list = []
+        runtime_environment_tool = None
+        if runtime_environment_enabled and not utility:
+            from box_agent.tools.runtime_environment_tool import (
+                RuntimeEnvironmentTool, RUNTIME_ENVIRONMENT_METHOD,
+            )
+
+            async def _runtime_request(payload: dict[str, Any]) -> dict[str, Any]:
+                send_ext = getattr(self._conn, "ext_method", None) or getattr(self._conn, "extMethod", None)
+                if send_ext is None:
+                    return {"status": "unavailable"}
+                return await send_ext(RUNTIME_ENVIRONMENT_METHOD, {**payload, "sessionId": session_id})
+
+            runtime_environment_tool = RuntimeEnvironmentTool(_runtime_request)
+            tools.append(runtime_environment_tool)
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
             session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
@@ -2184,6 +2200,31 @@ class BoxACPAgent:
         agent = state.agent
         session_skill_loader = state.skill_loader
         tools = list(agent.tools.values())
+        if runtime_environment_tool is not None:
+            from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+            def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
+                shell = None
+                for runtime_tool in agent.tools.values():
+                    if isinstance(runtime_tool, (BashTool, JupyterSandboxTool)):
+                        runtime_tool.update_runtime_env(values)
+                    if isinstance(runtime_tool, BashTool):
+                        shell = {
+                            "name": runtime_tool.shell_name,
+                            "instruction": (
+                                f"Subsequent bash tool calls must use {runtime_tool.shell_name} syntax. "
+                                "This is the current shell after environment refresh; "
+                                "do not reuse commands written for a different shell."
+                            ),
+                        }
+                return shell
+
+            runtime_environment_tool.apply_environment = _apply_runtime_environment
+            runtime_environment_tool.workspace_dir = workspace
+            for runtime_tool in tools:
+                if isinstance(runtime_tool, JupyterSandboxTool):
+                    runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
+                    runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
         for tool in tools:
             # Keep Bash ownership across a rebind while other process-backed
             # tools (notably Python kernels) remain handle-scoped.
@@ -2255,6 +2296,8 @@ class BoxACPAgent:
             response_meta["capabilities"]["skillhub_install_versions"] = [
                 SKILLHUB_INSTALL_CAPABILITY_VERSION
             ]
+        if runtime_environment_tool is not None:
+            response_meta["capabilities"]["runtime_environment_versions"] = [1]
         skills = (
             session_skill_loader.list_skills_metadata(include_connector=False)
             if session_skill_loader is not None
