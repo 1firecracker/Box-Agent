@@ -1427,6 +1427,14 @@ class JupyterSandboxTool(Tool):
             process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
         )
         child._requires_subprocess = True
+        if self.runtime_preparer is not None:
+            prepare_runtime = self.runtime_preparer
+
+            async def prepare_child_runtime() -> None:
+                await prepare_runtime()
+                child.update_runtime_env(self.runtime_env)
+
+            child.runtime_preparer = prepare_child_runtime
         return child
 
     async def shutdown_owned_sessions(self) -> None:

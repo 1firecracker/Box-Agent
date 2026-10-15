@@ -23,6 +23,10 @@ The Agent does not mutate global environment variables or wait for its own resta
 Cancelling an Agent wait does not cancel the host's shared installer. A 600-second
 wait timeout reports that installation may still be running; inspect status next.
 
+Delegated Python execution borrows the parent's host readiness check and refreshes
+the child's managed runtime paths after it succeeds. Child kernels retain their
+own owner namespaces, and concurrent initialization keeps the shared readiness lock.
+
 Office Desktop retains its startup download plan and paths. Explicit tool `ensure`
 only supplements the requested capability and its packages, sharing the startup
 installer lock. Settings retain explicit forced repair. `execute_code` returns

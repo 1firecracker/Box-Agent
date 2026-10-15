@@ -124,6 +124,40 @@ async def test_explicit_python_bypasses_host_and_persists_in_session(execution):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ready", [False, True])
+async def test_child_python_checks_host_readiness_and_uses_refreshed_managed_path(
+    execution, monkeypatch, ready,
+):
+    parent, path = execution
+
+    async def prepare():
+        if not ready:
+            raise RuntimeError("host installing")
+        parent.update_runtime_env({"BOX_AGENT_SANDBOX_PYTHON": str(path)})
+
+    parent.runtime_preparer = AsyncMock(side_effect=prepare)
+    monkeypatch.setattr(jupyter.SandboxEnvironment, "ensure_ready", AsyncMock())
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env", None)
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env_key", None)
+    child = parent.fork_for_child("child")
+    for name in ("_create_session", "_execute_session_code", "_get_workspace"):
+        monkeypatch.setattr(child, name, getattr(parent, name))
+
+    result = await child.execute("print(2)", session_id="child")
+
+    parent.runtime_preparer.assert_awaited_once()
+    assert result.success is ready
+    if ready:
+        session = child._sessions[child._session_key("child")]
+        assert session.sandbox_env.python_path == path
+        assert child.runtime_env is not parent.runtime_env
+        assert child.runtime_env["BOX_AGENT_SANDBOX_PYTHON"] == str(path)
+    else:
+        assert "RUNTIME_NOT_READY" in result.error
+        assert child._sessions == {}
+
+
+@pytest.mark.asyncio
 async def test_changing_python_requires_new_session_not_silent_state_loss(execution, tmp_path):
     tool, path = execution
     other = tmp_path / "other.exe"
