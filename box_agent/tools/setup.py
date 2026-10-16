@@ -24,6 +24,7 @@ from box_agent.tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.execution_result_tool import ReportExecutionResultTool
 from box_agent.tools.file import JsonlQueryTool, ReadTool
+from box_agent.tools.file.email_tool import ExtractEmailAttachmentTool, ReadEmailTool
 from box_agent.tools.file_tools import (
     AppendTool,
     EditTool,
@@ -760,6 +761,18 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # File tools resolve relative paths from relative_root and retain workspace scope.
     if config.tools.enable_file_tools:
         file_tools: list[Tool] = [
+            ExtractEmailAttachmentTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            ReadEmailTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
             ReadTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,

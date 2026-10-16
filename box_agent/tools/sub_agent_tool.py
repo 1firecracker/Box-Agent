@@ -145,11 +145,12 @@ class _WriteScopedTool(Tool):
             context = (FileWriteInvocationContext(validate_write_target=self._write_scope_error)
                        if kwargs.get("action") in {"begin", "commit", "abort"} else None)
             return await self._tool.invoke(kwargs, context=context)
-        path = kwargs.get("path")
+        path_key = "output_path" if self.name == "extract_email_attachment" else "path"
+        path = kwargs.get(path_key)
         if not isinstance(path, str) or not path.strip():
             return ToolResult(
                 success=False,
-                error="WRITE_SCOPE_VIOLATION: a non-empty path is required.",
+                error=f"WRITE_SCOPE_VIOLATION: a non-empty {path_key} is required.",
             )
         target = Path(path).expanduser()
         if not target.is_absolute():
@@ -378,7 +379,7 @@ class SubAgentTool(EventEmittingTool):
             "the startup and merge cost. The parent remains responsible for synthesis, conflicts, "
             "final deliverables, and verification.\n\n"
             "Pass a complete `task` brief. `required_tools` defaults only to available trusted "
-            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `grep`, `glob`, "
+            "read/search tools (`read_file`, `read_email`, `query_jsonl`, `search_files`, `grep`, `glob`, "
             "`web_search`, `web_extract`). Declaring `skills` also includes available "
             "get_skill/list_skills, "
             "restricted to assigned Skills and dependencies. With an exact "
@@ -764,7 +765,7 @@ class SubAgentTool(EventEmittingTool):
             return tools
         scoped: dict[str, Tool] = {}
         for name, tool in tools.items():
-            if name in {"write_file", "append_file", "edit_file", "publish_artifact"}:
+            if name in PATH_SCOPED_WRITE_TOOLS or name == "publish_artifact":
                 scoped[name] = _WriteScopedTool(tool, self._workspace_dir, scopes or ())
             else:
                 scoped[name] = tool

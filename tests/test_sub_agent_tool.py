@@ -1011,7 +1011,7 @@ async def test_omitted_required_tools_with_scope_reports_missing_parent_writers(
     assert result.raw_output["retryable"] is False
     assert "no available file-write tools" in result.raw_output["message"].lower()
     assert result.raw_output["required_any_of"] == [
-        "append_file", "edit_file", "write_file"
+        "append_file", "edit_file", "extract_email_attachment", "write_file"
     ]
     llm.generate.assert_not_called()
     llm.generate_stream.assert_not_called()

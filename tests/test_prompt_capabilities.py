@@ -5,7 +5,7 @@ import pytest
 
 from box_agent.agent_session import AgentSession
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.prompt_capabilities import render_code_search_tools
+from box_agent.prompt_capabilities import render_code_search_tools, resolve_capability_placeholders
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.setup import build_image_generation_prompt
@@ -17,6 +17,20 @@ def test_search_guidance_names_only_available_file_tools(tools):
     prompt = render_code_search_tools(tools)
     for name in {"read_file", "search_files", "glob", "grep"} - tools:
         assert f"`{name}`" not in prompt
+
+
+def test_email_guidance_is_only_present_when_the_decoder_is_available():
+    without = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file'})
+    with_email = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'read_email'})
+    assert '`read_email`' not in without
+    assert '`read_email`' in with_email
+    assert 'attachment_index' not in with_email
+    assert '`extract_email_attachment`' not in with_email
+    with_extraction = resolve_capability_placeholders(
+        '{FILE_OPERATIONS}', {'read_email', 'extract_email_attachment'},
+    )
+    assert '`extract_email_attachment`' in with_extraction
+    assert 'attachment_index' in with_extraction
 
 
 @pytest.mark.parametrize("source", ["config", "env"])

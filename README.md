@@ -49,6 +49,20 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ## Key Features
 
+### Local Email Analysis
+
+`read_email` decodes local `.eml` headers, plain/HTML bodies and attachment
+metadata offline, without a Python sandbox or additional packages. Prefer it
+over `read_file` for emails. The body supports character pagination; continue
+with `next_offset` and `expected_sha256=source_sha256` to detect a changed source.
+To inspect an attachment, call the separate `extract_email_attachment` tool
+with its `attachment_index` and a new `output_path` inside the workspace, then
+use the appropriate document or image tool. Reading creates no files;
+extraction checks write permissions and never overwrites a file. Read-only
+sub-agents can read emails; delegated extraction requires an explicit write scope.
+Messages are limited to 50 MiB, 256 MIME parts, 30 nesting levels and 100
+attachments. Encrypted messages are not decrypted.
+
 ### Sub-Agent Parallelism
 
 Delegate isolated work through a flat task contract with optional tools, Skills,

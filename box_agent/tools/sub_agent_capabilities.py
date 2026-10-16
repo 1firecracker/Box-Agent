@@ -12,6 +12,7 @@ checks remain the final resource-level authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import skill_dependencies
@@ -28,11 +29,11 @@ BATCH_AGGREGATE_MAX_CHARS = 200_000
 
 _BATCH_FILES_ALLOWED_TOOLS = frozenset({"read_file"})
 DEFAULT_SAFE_TOOL_NAMES = frozenset(
-    {"glob", "grep", "query_jsonl", "read_file", "search_files"}
+    {"glob", "grep", "query_jsonl", "read_email", "read_file", "search_files"}
 )
 DEFAULT_READ_TOOL_NAMES = DEFAULT_SAFE_TOOL_NAMES | frozenset({"web_extract", "web_search"})
 SKILL_READ_TOOL_NAMES = frozenset({"get_skill", "list_skills"})
-PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file"})
+PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file", "extract_email_attachment"})
 TRUSTED_NETWORK_TOOL_NAMES = frozenset(
     {"generate_image", "inspect_images", "web_extract", "web_search"}
 )
@@ -61,6 +62,8 @@ class ToolCapabilityMetadata:
 # treated conservatively rather than inferred from their description.
 BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "read_file": ToolCapabilityMetadata(read=True),
+    "read_email": ToolCapabilityMetadata(read=True),
+    "extract_email_attachment": ToolCapabilityMetadata(read=True, write=True),
     "query_jsonl": ToolCapabilityMetadata(read=True),
     "search_files": ToolCapabilityMetadata(read=True),
     "grep": ToolCapabilityMetadata(read=True),
@@ -229,7 +232,7 @@ class CapabilityFailure:
                         "message": (
                             "write_scope declares outputs, but explicit required_tools "
                             "contains no file-write tool. For a write task, include "
-                            "write_file, edit_file, or append_file in required_tools, "
+                            "write_file, edit_file, append_file, or extract_email_attachment in required_tools, "
                             "or omit required_tools to use scoped file-tool defaults. "
                             "For a read-only task, remove write_scope."
                         ),
@@ -416,7 +419,8 @@ def parse_delegation_spec(
             # Files require an actual reader; the resolver reports a missing
             # parent read_file instead of starting a child unable to read inputs.
             selected_defaults.add("read_file")
-            if not normalized_write_scope and min(raw_steps, general_max_steps) == 1:
+            if (not normalized_write_scope and min(raw_steps, general_max_steps) == 1
+                    and not any(Path(file).suffix.casefold() == ".eml" for file in normalized_files)):
                 # Preserve old one-call file summaries within their stated budget.
                 selected_defaults = {"read_file"}
         normalized_required_tools = tuple(sorted(selected_defaults))
@@ -573,7 +577,7 @@ def _tool_denial_reason(
         constraints.write_scope is not None
         and metadata.write
         and name not in EXECUTION_TOOL_NAMES
-        and name not in {"write_file", "append_file", "edit_file"}
+        and name not in PATH_SCOPED_WRITE_TOOLS
     ):
         return "write_scope_unenforceable"
     return None
