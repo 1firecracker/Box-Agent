@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
+from .chat_references import chat_mutation_error, mutations
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
 from .pptx_safety import (
@@ -1461,6 +1462,7 @@ Tips:
   - Use absolute paths instead of cd when possible
   - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
   - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
+  - Files referenced by chat and their local dependencies must remain available. Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
   - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; otherwise prepare the managed Python through local_environment when available. Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
@@ -1673,6 +1675,14 @@ Examples:
                     stderr=f"Blocked: {obsidian_cli_error}",
                     exit_code=1,
                 )
+
+            for mutation in mutations("bash", {"command": command}, Path(self.workspace_dir or ".")):
+                denied = chat_mutation_error(mutation.path, mutation.operation)
+                if denied is not None:
+                    error = denied.error
+                    return BashOutputResult(
+                        success=False, error=error, stdout="", stderr=error, exit_code=1,
+                    )
 
             # 1. Only an explicitly trusted full-access session may bypass the
             # approval prompt. Hard product blocks above and deletion backups remain.

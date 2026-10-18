@@ -423,6 +423,11 @@ def _assert_schema_contract(tools, profile):
             ).replace(
                 '  - Chain dependent commands with &&: git add . && git commit -m "msg"\n',
                 "  - Chain dependent commands with &&: npm install && npm test\n",
+            ).replace(
+                "  - For temporary script outputs elsewhere,",
+                "  - Files referenced by chat and their local dependencies must remain available. "
+                "Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.\n"
+                "  - For temporary script outputs elsewhere,",
             )
             entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
                 "type": "array", "items": {"type": "string"}, "maxItems": 64,

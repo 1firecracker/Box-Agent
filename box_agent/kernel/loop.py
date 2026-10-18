@@ -1021,6 +1021,7 @@ async def _run_agent_loop_impl(
             commit_result=tool_messages.commit_result,
             validate_followup=validate_followup,
             policy_error=browser_intent_policy.tool_call_error,
+            session_log=session_log,
             workspace_dir=workspace_dir,
             session_id=session_id, turn_id=turn_id,
             permission_negotiator=permission_negotiator, logger=logger,

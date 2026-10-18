@@ -61,6 +61,8 @@ def content_fingerprint(path: Path) -> tuple[int, str] | None:
 def write_metadata(path: Path, value: dict) -> None:
     """Atomic sidecar writes also work for concurrent independent producers."""
     target = metadata_path(path)
+    if read_metadata(target).get("retain_for_chat") is True:
+        value = {**value, "retain_for_chat": True}
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
                                      prefix=".artifact-", suffix=".tmp", delete=False) as stream:
         temporary = Path(stream.name)
@@ -74,6 +76,30 @@ def write_metadata(path: Path, value: dict) -> None:
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def retain_chat_file(path: Path) -> None:
+    """Cache retention without promoting a file's delivery placement."""
+    value = read_metadata(metadata_path(path))
+    if value.get("retain_for_chat") is not True:
+        write_metadata(path, {**value, "retain_for_chat": True})
+
+
+def retained_chat_file_in(path: Path) -> Path | None:
+    """Find a retained file or sidecar within a proposed mutation target."""
+    if not path.name:
+        return None
+    marker = path if path.name.startswith(".") and path.name.endswith(SUFFIX) else metadata_path(path)
+    if read_metadata(marker).get("retain_for_chat") is True:
+        return path
+    for parent in path.parents:
+        if parent.name and read_metadata(metadata_path(parent)).get("retain_for_chat") is True:
+            return parent
+    if path.is_dir() and not path.is_symlink():
+        for marker in path.rglob(f".*{SUFFIX}"):
+            if read_metadata(marker).get("retain_for_chat") is True:
+                return marker.with_name(marker.name[1:-len(SUFFIX)])
+    return None
 
 
 def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[str]]:

@@ -1116,7 +1116,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                 f"({state.size_bytes} bytes, sha256={digest})."
             ),
             raw_output={
-                "type": "artifact",
+                "type": "intermediate_asset" if temporary else "artifact",
                 "path": str(state.target),
                 "transaction_state": "committed",
                 "created": created,

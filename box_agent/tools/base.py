@@ -92,6 +92,7 @@ class ToolInvocationContext:
     skill_reader: Callable[..., ToolResult] | None = None
     child_budgets: tuple[DelegatedBudget, ...] = ()
     budget_charge: BudgetCharge = field(default_factory=BudgetCharge)
+    chat_references: Any = None
 
 
 class Tool:

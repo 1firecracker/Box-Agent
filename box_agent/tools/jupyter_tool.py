@@ -129,7 +129,7 @@ async def _start_sandbox_kernel(
         raise RuntimeError(f"Sandbox kernel startup failed: {exc}") from exc
 
 
-def _kernel_write_guard_setup_code(workspace: Path) -> str:
+def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None) -> str:
     """Build kernel code that confines user writes to artifact/internal roots."""
     roots = (
         workspace.resolve(),
@@ -138,9 +138,11 @@ def _kernel_write_guard_setup_code(workspace: Path) -> str:
         RUNTIME_PACKAGES_DIR.resolve(),
     )
     encoded_roots = json.dumps([str(root) for root in roots])
+    protected, allowed_deletions = reference_policy or ([], [])
     return f"""
 import os as _box_guard_os
 import sys as _box_guard_sys
+import json as _box_guard_json
 
 if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
     def _box_agent_path_is_writable(path):
@@ -161,13 +163,52 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
                 continue
         return False
 
-    def _box_agent_require_writable(path):
+    def _box_agent_require_writable(path, operation="write"):
         if not _box_agent_path_is_writable(path):
             raise PermissionError(
                 "EXECUTE_CODE_WRITE_OUTSIDE_WORKSPACE: writes are limited to "
                 f"{{getattr(_box_guard_sys, '_box_agent_write_roots', ())}}; "
                 f"rejected {{path!r}}"
             )
+        if operation == "write":
+            return
+        if isinstance(path, (str, bytes, _box_guard_os.PathLike)):
+            resolved = _box_guard_os.path.realpath(_box_guard_os.path.abspath(path))
+            if isinstance(resolved, bytes):
+                resolved = _box_guard_os.fsdecode(resolved)
+            if resolved.endswith(".artifact.json"):
+                folder, name = _box_guard_os.path.split(resolved)
+                if name.startswith("."):
+                    resolved = _box_guard_os.path.join(folder, name[1:-len(".artifact.json")])
+            # Recreated kernels also honor caches written by other chats.
+            candidates = [resolved]
+            parent = _box_guard_os.path.dirname(resolved)
+            while parent and parent != _box_guard_os.path.dirname(parent):
+                candidates.append(parent)
+                parent = _box_guard_os.path.dirname(parent)
+            if _box_guard_os.path.isdir(resolved):
+                for folder, _, files in _box_guard_os.walk(resolved):
+                    candidates.extend(_box_guard_os.path.join(folder, name[1:-len(".artifact.json")]) for name in files if name.startswith(".") and name.endswith(".artifact.json"))
+            for candidate in candidates:
+                folder, name = _box_guard_os.path.split(candidate)
+                marker = _box_guard_os.path.join(folder, "." + name + ".artifact.json")
+                try:
+                    if _box_guard_os.path.getsize(marker) > 4096:
+                        continue
+                    with open(marker, encoding="utf-8") as stream:
+                        retained = _box_guard_json.load(stream).get("retain_for_chat") is True
+                except (OSError, ValueError, AttributeError):
+                    continue
+                if retained and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
+                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
+            for retained in getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                try:
+                    common = _box_guard_os.path.commonpath((retained, resolved))
+                    affected = retained == resolved or common == resolved or _box_guard_os.path.isdir(retained) and common == retained
+                except ValueError:
+                    affected = False
+                if affected and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
+                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
 
     def _box_agent_write_audit(event, args):
         if not getattr(_box_guard_sys, "_box_agent_write_guard_enabled", False):
@@ -194,17 +235,26 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
                 _box_agent_require_writable(args[0])
         elif event in {{
             "os.mkdir",
-            "os.remove",
-            "os.rmdir",
-            "os.truncate",
-            "os.unlink",
         }} and args:
-            _box_agent_require_writable(args[0])
+            # mkdir cannot destroy an existing reference. Libraries routinely
+            # call mkdir(exist_ok=True) on a deliverable's parent directory.
+            if not _box_agent_path_is_writable(args[0]):
+                _box_agent_require_writable(args[0])
+        elif event in {{"os.remove", "os.rmdir", "os.unlink", "os.truncate"}} and args:
+            if event != "os.truncate" and len(args) > 1 and isinstance(args[-1], int) and args[-1] >= 0 and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
+            _box_agent_require_writable(args[0], "write" if event == "os.truncate" else "delete")
         elif event in {{"os.rename", "os.replace"}} and len(args) >= 2:
-            _box_agent_require_writable(args[0])
+            if any(isinstance(fd, int) and fd >= 0 for fd in args[2:]) and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
+            _box_agent_require_writable(args[0], "move")
             _box_agent_require_writable(args[1])
         elif event in {{"shutil.copyfile", "shutil.copymode", "shutil.copystat"}} and len(args) >= 2:
             _box_agent_require_writable(args[1])
+        elif event == "shutil.rmtree" and args:
+            _box_agent_require_writable(args[0], "delete")
+        elif event in {{"os.system", "subprocess.Popen", "os.exec", "os.posix_spawn"}} and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+            raise PermissionError("CHAT_REFERENCE_PROTECTED: run external commands through bash so reference checks apply")
 
     _box_guard_sys.addaudithook(_box_agent_write_audit)
     _box_guard_sys._box_agent_write_guard_installed = True
@@ -213,6 +263,8 @@ _box_guard_sys._box_agent_write_roots = tuple(
     _box_guard_os.path.realpath(root) for root in {encoded_roots}
 )
 _box_guard_sys._box_agent_write_guard_enabled = True
+_box_guard_sys._box_agent_chat_paths = {protected!r}
+_box_guard_sys._box_agent_chat_delete = {allowed_deletions!r}
 """
 
 
@@ -226,9 +278,10 @@ def _execute_with_kernel_write_guard(
     session: "JupyterKernelSession",
     code: str,
     timeout: int,
+    reference_policy=None,
 ) -> tuple[str, list[str], Optional[str]]:
     setup_result = session.execute(
-        _kernel_write_guard_setup_code(session.workspace),
+        _kernel_write_guard_setup_code(session.workspace, reference_policy),
         timeout=min(timeout, 10),
     )
     if setup_result[2] is not None:
@@ -1587,9 +1640,12 @@ class JupyterSandboxTool(Tool):
         session: "JupyterKernelSession | InProcessKernelSession",
         code: str,
         timeout: int,
+        reference_policy=None,
     ) -> tuple[str, list[str], Optional[str]]:
         if isinstance(session, JupyterKernelSession):
-            return _execute_with_kernel_write_guard(session, code, timeout)
+            return _execute_with_kernel_write_guard(session, code, timeout, reference_policy)
+        if reference_policy and reference_policy[0]:
+            return "", [], "CHAT_REFERENCE_PROTECTED: an isolated kernel is required when chat references are active"
         return session.execute(code, timeout)
 
     @property
@@ -1853,11 +1909,17 @@ Output formats:
         # take minutes).  Wrap with an overall timeout as a safety net.
         _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
         loop = asyncio.get_event_loop()
+        from .chat_references import current_chat_policy
+        reference_policy = current_chat_policy()
+        execute_code = self._execute_session_code
+        if reference_policy[0]:
+            from functools import partial
+            execute_code = partial(execute_code, reference_policy=reference_policy)
         try:
             stdout, images, error = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    self._execute_session_code,
+                    execute_code,
                     session,
                     code,
                     timeout,
@@ -1875,7 +1937,7 @@ Output formats:
                         stdout, images, error = await asyncio.wait_for(
                             loop.run_in_executor(
                                 None,
-                                self._execute_session_code,
+                                execute_code,
                                 session,
                                 code,
                                 timeout,
