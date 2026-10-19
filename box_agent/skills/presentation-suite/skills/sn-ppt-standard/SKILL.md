@@ -1,6 +1,6 @@
 ---
 name: sn-ppt-standard
-description: 仅在 `sn-ppt-entry` 与 `sn-ppt-story` 已准备绝对 `DECK_DIR` 和 `outline.md` 后使用；生成每页独立 HTML（1600×900）、渲染 PNG、逐页讲稿、`present.html`，并按 `static_postprocess` 选择生成由 Standard 自有 exporter 转换的 PPTX。**`present.html` 始终是必交付产物，缺失即技术故障，不得交付；`static_postprocess` 含 `pptx` 时 PPTX 同为必交付产物（缺一即技术故障），且只能由 Standard 自有 exporter 生成；仅当用户明确要求只要 HTML（`static_postprocess` 为 `[]`）时，PPTX 才可不交付。**
+description: 仅在 `sn-ppt-entry` 与 `sn-ppt-story` 已准备绝对 `DECK_DIR` 和 `outline.md` 后使用；生成每页独立 HTML（默认 1600×900；用户指定尺寸优先）、渲染 PNG、逐页讲稿、`present.html`，并按 `static_postprocess` 选择生成由 Standard 自有 exporter 转换的 PPTX。**`present.html` 始终是必交付产物，缺失即技术故障，不得交付；`static_postprocess` 含 `pptx` 时 PPTX 同为必交付产物（缺一即技术故障），且只能由 Standard 自有 exporter 生成；仅当用户明确要求只要 HTML（`static_postprocess` 为 `[]`）时，PPTX 才可不交付。**
 metadata:
   allow_override: false
   user_visible: false
@@ -359,3 +359,12 @@ Review：
 | `install.sh` | 保留：跨环境依赖、字体和 Chromium 安装无法由运行脚本可靠替代；依赖清单已内联 |
 
 首次部署依赖解析 venv、PyMuPDF、可分发字体、FontTools/Brotli 和 Playwright Chromium；用 `scripts/install.sh` 安装。运行脚本时若 skill 挂载路径不同，使用实际 skill root。
+
+
+## Canvas dimensions / 画布尺寸执行约定
+
+- 用户指定像素尺寸优先；1600×900 仅为未指定时的默认值。1920×1080 是精确 CSS 画布要求，不能用“同比例”代替。
+- 在已有的绝对任务目录中执行一次 `python "<SKILL_ROOT>/scripts/deck.py" init "$DECK_DIR" --width 1920 --height 1080`（数值替换为用户要求）。不指定尺寸则省略两个参数。已有 CSS 不被 init 改写；变更尺寸须明确编辑工作区 `base.css`。
+- `base.css` 中的 `--canvas-w` / `--canvas-h` 是本任务唯一尺寸来源；每页 `.slide` 使用它们，统一全册。`prepare`、`review-prep`、批量 `render.py --batch "$DECK_DIR"` 自动沿用尺寸，不需要反复查脚本源码，也不要覆盖 Skill 安装文件。
+- 播放器沿用 CSS 画布并等比适配窗口；Standard PPTX exporter 从实际 HTML 画布映射到相同纵横比的英寸页面。CSS 像素、截图像素和 PPTX 英寸是不同单位：PNG 为 2 倍设备像素（1920×1080 画布截图为 3840×2160），PPTX 无固定像素分辨率。
+- 先按此约定 init、规划并写页面，成功后进入既有渲染与验收流程；只有工具返回具体失败才读对应诊断，不为尺寸猜测反复搜索实现。

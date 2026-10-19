@@ -164,6 +164,7 @@ def source_repo(tmp_path, monkeypatch):
     monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_windows_compat_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_canvas_dimensions_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)

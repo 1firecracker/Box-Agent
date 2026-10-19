@@ -86,15 +86,20 @@ async def test_real_ppt_prepare_preserves_chat_and_atomically_refreshes_speech(t
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get("PPT_RENDER_BROWSER_TESTS") != "1", reason="installed Chromium smoke; platform CI opts in")
-async def test_real_ppt_render_batch_runs_guarded_children_and_preserves_chat(tmp_path, retained):
+@pytest.mark.parametrize("width,height", [(1600, 900), (1920, 1080), (1200, 900)])
+async def test_real_ppt_render_batch_runs_guarded_children_and_preserves_chat(tmp_path, retained, width, height):
     target, guard = retained
     deck = tmp_path / "new deck"
     (deck / "slides").mkdir(parents=True)
+    (deck / "base.css").write_text(f":root{{--canvas-w:{width}px;--canvas-h:{height}px}}")
     slide = deck / "slides/slide_01.html"
-    slide.write_text('<html><style>html,body{margin:0;width:1600px;height:900px} .slide{width:1600px;height:900px}</style><body><section class="slide"><h1>Hello</h1></section></body></html>')
+    slide.write_text(f'<html><link rel="stylesheet" href="../base.css"><style>html,body{{margin:0;width:var(--canvas-w);height:var(--canvas-h)}} .slide{{width:var(--canvas-w);height:var(--canvas-h)}}</style><body><section class="slide"><h1>Hello</h1></section></body></html>')
     guard.retain(slide)
     result = await run_script(tmp_path, guard, STANDARD / "scripts/render.py", "--batch", deck, "--pages", "1", timeout=60)
     assert result.success, result.error
+    from PIL import Image
+    with Image.open(deck / "renders/slide_01.png") as png:
+        assert png.size == (width * 2, height * 2)
     assert (deck / "renders/slide_01.png").stat().st_size > 1000
     assert set(json.loads((deck / "renders/render.json").read_text())["pages"]) == {"01"}
     assert target.read_text() == "published"

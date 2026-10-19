@@ -152,3 +152,12 @@ html_changes: <本轮新增或修改的页面>
 blocked_reasons: none | <列表>
 summary: <一两句>
 ```
+
+
+## Canvas dimensions / 画布尺寸执行约定
+
+- 用户指定像素尺寸优先；1600×900 仅为未指定时的默认值。1920×1080 是精确 CSS 画布要求，不能用“同比例”代替。
+- 在已有的绝对任务目录中执行一次 `python "<SKILL_ROOT>/scripts/deck.py" init "$DECK_DIR" --width 1920 --height 1080`（数值替换为用户要求）。不指定尺寸则省略两个参数。已有 CSS 不被 init 改写；变更尺寸须明确编辑工作区 `base.css`。
+- `base.css` 中的 `--canvas-w` / `--canvas-h` 是本任务唯一尺寸来源；每页 `.slide` 使用它们，统一全册。`prepare`、`review-prep`、批量 `render.py --batch "$DECK_DIR"` 自动沿用尺寸，不需要反复查脚本源码，也不要覆盖 Skill 安装文件。
+- 播放器沿用 CSS 画布并等比适配窗口；Standard PPTX exporter 从实际 HTML 画布映射到相同纵横比的英寸页面。CSS 像素、截图像素和 PPTX 英寸是不同单位：PNG 为 2 倍设备像素（1920×1080 画布截图为 3840×2160），PPTX 无固定像素分辨率。
+- 先按此约定 init、规划并写页面，成功后进入既有渲染与验收流程；只有工具返回具体失败才读对应诊断，不为尺寸猜测反复搜索实现。
