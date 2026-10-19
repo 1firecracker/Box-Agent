@@ -43,9 +43,9 @@ SKILL_RUNTIME_MARKER = "## Skill Runtime Context\n<skill runtime facts>"
 # Tool names a default session registers (plus ripgrep-backed grep/glob and a
 # configured image service). Prompts only mention tools the session has.
 FULL_TOOLS = frozenset("""
-    append_file bash bash_kill bash_output create_scheduled_task edit_file execute_code generate_image
-    get_skill glob goal_read goal_write grep inspect_images list_skills mcp_config memory_read memory_search
-    memory_write plan_read plan_write publish_artifact query_jsonl read_file report_execution_result
+    append_file bash bash_kill bash_output create_scheduled_task edit_file execute_code extract_email_attachment
+    generate_image get_skill glob goal_read goal_write grep inspect_images list_skills mcp_config memory_read memory_search
+    memory_write plan_read plan_write publish_artifact query_jsonl read_email read_file report_execution_result
     request_user_decision request_user_input sandbox_status search_files sub_agent todo_read todo_write
     tool_search write_file
 """.split())
@@ -70,7 +70,8 @@ CASES = {
     "acp_general_minimal_tools": ("acp", None, False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_no_file_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS - {
-        "read_file", "search_files", "query_jsonl", "write_file", "edit_file", "append_file",
+        "read_file", "read_email", "extract_email_attachment", "search_files", "query_jsonl",
+        "write_file", "edit_file", "append_file",
     }),
     "python_data_analysis_no_sandbox": ("python", "data_analysis", False, False, False,
                                         FULL_TOOLS - {"execute_code"}),
@@ -184,7 +185,7 @@ async def test_session_prompt_has_no_unrendered_placeholders(name, tmp_path, pin
 
 
 # Every tool name a session could have. A backticked mention of one of these is
-# an instruction to use it, unless the clause is a prohibition ("不要用 X").
+# an instruction to use it, unless prohibited or conditional on availability.
 KNOWN_TOOL_NAMES = FULL_TOOLS | {"install_skillhub_skill", "search_skillhub", "web_extract", "web_search"}
 _NEGATION = re.compile(r"不要|禁止|不得|勿|Do not|Do NOT|don't", re.IGNORECASE)
 
@@ -196,12 +197,24 @@ def _instructed_tools(prompt: str) -> dict[str, str]:
         if _NEGATION.search(clause):
             continue
         for name in re.findall(r"`([a-z_]+)", clause):
+            if re.search(r"(?:若|如果)\s*`" + re.escape(name) + r"`\s*可用", clause):
+                continue
             if name in KNOWN_TOOL_NAMES:
                 found.setdefault(name, clause.strip())
     return found
 
 
-@pytest.mark.parametrize("name", sorted(name for name, case in CASES.items() if not case[2]))
+@pytest.mark.parametrize("clause,expected", [
+    ("此时若 `request_user_input` 可用，必须调用一次", set()),
+    ("使用 `request_user_input` 请求补充信息", {"request_user_input"}),
+    ("EML 邮件用 `read_email` 读取", {"read_email"}),
+    ("分析邮件附件时用 `extract_email_attachment` 提取", {"extract_email_attachment"}),
+])
+def test_tool_guidance_scan_distinguishes_availability_conditions_from_instructions(clause, expected):
+    assert set(_instructed_tools(clause)) == expected
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
 async def test_session_prompt_only_instructs_registered_tools(name, tmp_path, pinned_environment):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

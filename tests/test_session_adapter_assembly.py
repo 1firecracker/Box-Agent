@@ -200,7 +200,7 @@ async def test_acp_preparation_preserves_direct_prompt_and_tool_contract(tmp_pat
     state = adapter._sessions[result.sessionId]
     resources = state.plugin_session.resources
     options = resources.context.options
-    available_tools = None if utility else frozenset(tool.name for tool in resources.tools)
+    available_tools = frozenset(tool.name for tool in resources.tools)
     expected = adapter._build_session_prompt(
         options.session_mode, workspace=tmp_path, policy=options.effective_policy,
         env_context=state.env_context, skill_runtime_context=state.skill_runtime_context,

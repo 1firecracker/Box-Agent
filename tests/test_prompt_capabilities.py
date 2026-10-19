@@ -68,6 +68,8 @@ async def test_real_session_prompt_respects_disabled_capabilities(tmp_path, monk
     try:
         prompt = session.agent.system_prompt
         if not file_tools:
+            assert "`read_email`" not in prompt
+            assert "`extract_email_attachment`" not in prompt
             for instruction in ("用 `search_files` 查看", "直接调用 `search_files`", "；调用 `search_files`",
                                 "文本正文用 `read_file`", "用 `write_file(path, content)`", "大文件使用 `write_file`"):
                 assert instruction not in prompt
@@ -77,6 +79,39 @@ async def test_real_session_prompt_respects_disabled_capabilities(tmp_path, monk
         if not sandbox:
             assert "always prefer `execute_code`" not in prompt
             assert "## Python Sandbox (execute_code)" not in prompt
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.parametrize("profile", ["acp", "cli", "python"])
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_utility_prompt_does_not_instruct_unregistered_tools(tmp_path, profile, sandbox):
+    config_dir = Path(__file__).resolve().parents[1] / "box_agent/config"
+    template_path = config_dir / "system_prompt.md"
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(enable_memory=False, workspace_dir=str(tmp_path),
+                          system_prompt_path=str(template_path)),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False),
+    )
+    template = template_path.read_text(encoding="utf-8").replace("{SKILLS_METADATA}", "")
+    session = await AgentSession.open(
+        config=config,
+        options=SessionOptions(profile=profile, utility=True, sandbox_mode=sandbox,
+                               workspace_dir=tmp_path),
+        host=HostBindings(llm_client=object(), system_prompt=template if profile == "acp" else None),
+    )
+    try:
+        assert not session.agent.tools
+        prompt = session.agent.system_prompt
+        assert "`read_email`" not in prompt
+        assert "`extract_email_attachment`" not in prompt
+        assert "文本正文用 `read_file`" not in prompt
+        assert "大文件使用 `write_file`" not in prompt
+        assert "## Python Sandbox (execute_code)" not in prompt
+        assert "使用 Bash 执行" not in prompt
+        assert "`request_user_decision`" not in prompt
+        assert "`sub_agent`" not in prompt
     finally:
         await session.aclose()
 

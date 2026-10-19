@@ -414,10 +414,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
         memory=resources.memory_manager,
         memory_block=memory_block,
         prompt_suffix=host.prompt_suffix,
-        available_tools=(
-            None if options.utility
-            else frozenset(tool.name for tool in resources.tools)
-        ),
+        available_tools=frozenset(tool.name for tool in resources.tools),
     )
 
     resources.state["child_system_prompt"] = compose_prompt_segments(
