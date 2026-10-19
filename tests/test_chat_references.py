@@ -67,6 +67,7 @@ async def test_excel_conversion_allows_cleanup_of_its_new_web_temporary_file(tmp
     assert guard.check("bash", {"command": f"rm {shlex.quote(str(source))}"})[0]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup", [
     "Path('report.pdf').unlink()",
     "target = Path('report.pdf'); target.unlink()",
@@ -79,13 +80,16 @@ async def test_excel_conversion_allows_cleanup_of_its_new_web_temporary_file(tmp
     "temp = tempfile.NamedTemporaryFile(delete=False)\ndef retarget():\n    temp.name = 'report.pdf'\nretarget()\nPath(temp.name).unlink()",
     "def cleanup():\n    temp = tempfile.NamedTemporaryFile(delete=False)\n    target = Path(temp.name)\n    def retarget():\n        nonlocal target\n        target = Path('report.pdf')\n    retarget()\n    target.unlink()\ncleanup()",
 ])
-def test_external_python_script_cannot_disguise_reference_deletion_as_temporary_cleanup(tmp_path, cleanup):
+async def test_external_python_script_cannot_disguise_reference_deletion_as_temporary_cleanup(tmp_path, cleanup):
     path, guard = referenced(tmp_path)
     script = tmp_path / "cleanup.py"
     script.write_text("import tempfile\nfrom pathlib import Path\n" + cleanup)
-    result, allowed = guard.check("bash", {"command": f"python {shlex.quote(str(script))}"})
-    assert result.error.startswith("CHAT_REFERENCE_PROTECTED")
-    assert not allowed
+    tool = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
+    result = await invoke_tool_once(tool, {"command": shlex.join([sys.executable, str(script)])},
+                                    ToolInvocationContext(chat_references=guard))
+    assert not result.success
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert result.permission_request is None
     assert path.read_text() == "original"
 
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -130,105 +129,12 @@ class Mutation:
     operation: str
 
 
-def _fresh_temporary_cleanup_calls(tree: ast.AST) -> set[int]:
-    """Recognize only local, un-reassigned NamedTemporaryFile paths.
-
-    A converter may contain cleanup in another format's branch. Its newly
-    allocated temporary file cannot name a pre-existing chat reference.
-    Unknown paths and reassigned variables still take the strict path check.
-    """
-    factories, constructors = set(), set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            factories.update(f"{alias.asname or alias.name}.NamedTemporaryFile" for alias in node.names if alias.name == "tempfile")
-            constructors.update(f"{alias.asname or alias.name}.Path" for alias in node.names if alias.name == "pathlib")
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "tempfile":
-                factories.update(alias.asname or alias.name for alias in node.names if alias.name == "NamedTemporaryFile")
-            elif node.module == "pathlib":
-                constructors.update(alias.asname or alias.name for alias in node.names if alias.name == "Path")
-    shadowed = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
-    shadowed.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
-    shadowed.update(node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
-    shadowed.update(node.value.id for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name))
-    imports = Counter(alias.asname or alias.name.split('.')[0] for node in ast.walk(tree)
-                      if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names)
-    shadowed.update(name for name, count in imports.items() if count > 1)
-    if "*" in imports:
-        return set()
-    factories = {name for name in factories if name.split('.')[0] not in shadowed}
-    constructors = {name for name in constructors if name.split('.')[0] not in shadowed}
-
-    def call_name(node):
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            return f"{node.value.id}.{node.attr}"
-        return ""
-
-    safe = set()
-    scopes = [tree, *(node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))]
-    for scope in scopes:
-        nodes, pending = [], list(ast.iter_child_nodes(scope))
-        while pending:
-            node = pending.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                continue
-            nodes.append(node)
-            pending.extend(ast.iter_child_nodes(node))
-        assignments: dict[str, list[ast.AST | None]] = {}
-        for node in nodes:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        assignments.setdefault(target.id, []).append(node.value)
-        # Loops, arguments, destructuring and attribute writes cannot establish
-        # ownership of a temporary path or its factory.
-        stores = Counter(node.id for node in ast.walk(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)))
-        invalid = {node.arg for node in nodes if isinstance(node, ast.arg)}
-        invalid.update(name for name, values in assignments.items() if stores[name] != len(values))
-        invalid.update(node.value.id for node in nodes if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name))
-        handles = {name for name, values in assignments.items() if name not in invalid and len(values) == 1
-                   and isinstance(values[0], ast.Call) and call_name(values[0].func) in factories
-                   and call_name(values[0].func).split('.')[0] not in assignments}
-        parents = {id(child): node for node in ast.walk(scope) for child in ast.iter_child_nodes(node)}
-        for node in ast.walk(scope):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in handles:
-                parent = parents.get(id(node))
-                if not (isinstance(parent, ast.Attribute) and isinstance(parent.ctx, ast.Load) and parent.attr in {"name", "close"}):
-                    handles.discard(node.id)
-
-        def fresh_path(node):
-            if isinstance(node, ast.Attribute) and node.attr == "name" and isinstance(node.value, ast.Name):
-                return node.value.id in handles
-            return (isinstance(node, ast.Call) and call_name(node.func) in constructors
-                    and len(node.args) == 1 and not node.keywords and fresh_path(node.args[0]))
-
-        paths = {name for name, values in assignments.items() if name not in invalid
-                 and any(fresh_path(value) for value in values)
-                 and all(fresh_path(value) or isinstance(value, ast.Constant) and value.value is None for value in values)}
-        for node in nodes:
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr == "unlink":
-                target = node.func.value
-            elif call_name(node.func) in {"os.unlink", "os.remove"} and node.args:
-                target = node.args[0]
-            else:
-                continue
-            if fresh_path(target) or isinstance(target, ast.Name) and target.id in paths:
-                safe.add(id(node))
-    return safe
-
-
-def _python_mutations(code: str, root: Path, *, strict=False) -> list[Mutation]:
+def _python_mutations(code: str, root: Path) -> list[Mutation]:
     """Resolve literal/assigned paths; the kernel audit hook checks dynamic I/O."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    temporary_cleanups = _fresh_temporary_cleanup_calls(tree)
     values: dict[str, str] = {}
     path_objects: set[str] = set()
     filesystem_modules = {"os", "shutil"}
@@ -278,8 +184,6 @@ def _python_mutations(code: str, root: Path, *, strict=False) -> list[Mutation]:
                         path_objects.add(target.id)
         if not isinstance(node, ast.Call):
             continue
-        if id(node) in temporary_cleanups:
-            continue
         name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
         if isinstance(node.func, ast.Name):
             name = imported_calls.get(name, name)
@@ -299,8 +203,6 @@ def _python_mutations(code: str, root: Path, *, strict=False) -> list[Mutation]:
         for target, operation in targets:
             if target:
                 result.append(Mutation((root / target).absolute(), operation))
-            elif strict:
-                result.append(Mutation(root, "unresolved"))
     return result
 
 
@@ -317,7 +219,7 @@ def _javascript_mutations(code: str, root: Path) -> list[Mutation]:
     return result
 
 
-def mutations(tool_name: str, arguments: dict, root: Path) -> list[Mutation]:
+def mutations(tool_name: str, arguments: dict, root: Path, *, python_runtime=False) -> list[Mutation]:
     if tool_name == "execute_code":
         return _python_mutations(arguments.get("code", ""), root)
     if tool_name != "bash":
@@ -358,17 +260,13 @@ def mutations(tool_name: str, arguments: dict, root: Path) -> list[Mutation]:
                     if script.is_file() and script.stat().st_size <= 1024 * 1024:
                         for execution_dir in directories:
                             result.extend(_javascript_mutations(script.read_text(errors="replace"), execution_dir))
-        elif name.startswith(("python", "pypy")) and "-c" in args:
+        elif name.startswith(("python", "pypy")) and "-c" in args and not python_runtime:
             index = args.index("-c")
             if index + 1 < len(args):
                 for directory in directories:
-                    result.extend(_python_mutations(args[index + 1], directory, strict=True))
-        elif name.startswith(("python", "pypy")) and positional:
-            for directory in directories:
-                script = (directory / positional[0]).resolve()
-                if script.is_file() and script.stat().st_size <= 1024 * 1024:
-                    for execution_dir in directories:
-                        result.extend(_python_mutations(script.read_text(errors="replace"), execution_dir, strict=True))
+                    result.extend(_python_mutations(args[index + 1], directory))
+        # External Python files are not executed in their entirety. The child
+        # audit hook checks actual I/O, including imports and dynamic paths.
         for target, operation in targets:
             if any(char in target for char in "$`{}"):
                 result.append(Mutation(root, "unresolved"))
@@ -377,9 +275,9 @@ def mutations(tool_name: str, arguments: dict, root: Path) -> list[Mutation]:
                 path = directory / target
                 candidates = [path, *glob.glob(str(path))] if glob.has_magic(str(path)) else [path]
                 result.extend(Mutation(Path(candidate).absolute(), operation) for candidate in candidates)
-    for match in re.finditer(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(.*?)\n\1(?:\n|$)", command, re.S):
+    for match in re.finditer(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n(.*?)\n\1(?:\n|$)", command if not python_runtime else "", re.S):
         for directory in directories:
-            result.extend(_python_mutations(match[2], directory, strict=True))
+            result.extend(_python_mutations(match[2], directory))
     return result
 
 
@@ -568,7 +466,14 @@ class ChatReferences:
     def _check_mutations(self, name: str, arguments: dict, approval: dict | None) -> tuple[ToolResult | None, frozenset[Path]]:
         impacted = []
         try:
-            changes = dict.fromkeys(mutations(name, arguments, self.root))
+            changes = mutations(name, arguments, self.root, python_runtime=name == "bash")
+            if name == "bash":
+                # Literal inline deletions can still use the existing explicit
+                # user confirmation. Ordinary Python branches are checked only
+                # when they execute, so function definitions cannot block help.
+                changes.extend(change for change in mutations(name, arguments, self.root)
+                               if self.explicit_delete(change.path))
+            changes = dict.fromkeys(changes)
             for change in changes:
                 refs = self.paths.copy() if change.operation == "unresolved" else self.affected(change.path)
                 if not refs and (retained := retained_chat_file_in(change.path)):
@@ -675,8 +580,12 @@ def chat_mutation_error(path: Path, operation="write") -> ToolResult | None:
     return ToolResult(success=False, error=f"CHAT_REFERENCE_PROTECTED: keep {path} available to chat; do not {operation} it as cleanup. Normal edits and appends are allowed.")
 
 
-def bash_chat_mutation_error(command: str, workspace: Path) -> ToolResult | None:
-    for mutation in dict.fromkeys(mutations("bash", {"command": command}, workspace)):
+def bash_chat_mutation_error(command: str, workspace: Path, *, python_runtime=True) -> ToolResult | None:
+    from .python_mutation_guard import python_guard_error
+
+    if error := python_guard_error(command):
+        return ToolResult(success=False, error=error)
+    for mutation in dict.fromkeys(mutations("bash", {"command": command}, workspace, python_runtime=python_runtime)):
         if denied := chat_mutation_error(mutation.path, mutation.operation):
             return denied
     return None

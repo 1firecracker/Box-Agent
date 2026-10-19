@@ -1119,6 +1119,35 @@ class BashTool(Tool):
     async def _create_subprocess(
         self, command: str, *, merge_stderr: bool = False,
     ) -> asyncio.subprocess.Process:
+        from .python_mutation_guard import PythonMutationGuard, uses_python
+
+        guard = None
+        if uses_python(command):
+            startup = asyncio.create_task(asyncio.to_thread(PythonMutationGuard, self._subprocess_env))
+            try:
+                guard = await asyncio.shield(startup)
+            except asyncio.CancelledError:
+                guard = await asyncio.shield(startup)
+                await asyncio.to_thread(guard.close)
+                raise
+        try:
+            process = await self._spawn_subprocess(
+                command, merge_stderr=merge_stderr,
+                environment=guard.environment if guard else self._subprocess_env,
+            )
+        except BaseException:
+            if guard:
+                await asyncio.to_thread(guard.close)
+            raise
+        if guard:
+            # The lease belongs to the process, including background jobs. It
+            # must outlive execute() and never mutate the tool's cached env.
+            process._box_agent_guard_task = asyncio.create_task(guard.close_on_exit(process))
+        return process
+
+    async def _spawn_subprocess(
+        self, command: str, *, merge_stderr: bool = False, environment: dict | None = None,
+    ) -> asyncio.subprocess.Process:
         """Create subprocess with platform-appropriate shell.
 
         On Windows uses PowerShell; on Unix uses the user's login shell
@@ -1137,8 +1166,8 @@ class BashTool(Tool):
                 # mutating the cached ``_subprocess_env``. Fall back to the
                 # process env when no custom env was prepared.
                 spawn_env = (
-                    dict(self._subprocess_env)
-                    if self._subprocess_env is not None
+                    dict(environment)
+                    if environment is not None
                     else os.environ.copy()
                 )
                 if self._bundled_win_path_dirs:
@@ -1171,7 +1200,7 @@ class BashTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=environment,
             )
         else:
             args = [self._login_shell]
@@ -1190,7 +1219,7 @@ class BashTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=environment,
                 start_new_session=True,
             )
 
@@ -1990,6 +2019,8 @@ Examples:
                 finally:
                     if process.returncode is None or not communicate_task.done():
                         await self._cleanup_foreground_process(process, communicate_task)
+                    if guard_task := getattr(process, "_box_agent_guard_task", None):
+                        await asyncio.shield(guard_task)
 
         except Exception as e:
             return BashOutputResult(

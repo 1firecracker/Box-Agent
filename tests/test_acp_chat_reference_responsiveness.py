@@ -2,6 +2,8 @@
 
 import asyncio
 import threading
+import shlex
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -17,9 +19,13 @@ from tests.test_acp import DummyConn, DoneLLM
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct_bash", [False, True])
-async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_responsive(tmp_path, monkeypatch, direct_bash):
+@pytest.mark.parametrize("python_script", [False, True], ids=["shell", "python-runtime"])
+async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_responsive(tmp_path, monkeypatch, direct_bash, python_script):
     import box_agent.tools.chat_references as references
 
+    script = tmp_path / "cleanup.py"
+    script.write_text("import os\nos.rmdir('cache')\n")
+    command_text = shlex.join([sys.executable, str(script)]) if python_script else "rm -rf cache"
     entered, release = threading.Event(), threading.Event()
 
     def slow_scan(path):
@@ -38,7 +44,7 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
         async def generate_stream(self, messages, tools=None, **kwargs):
             if any("cleanup cache" in str(message.content) for message in messages if message.role == "user") and not any(message.role == "tool" for message in messages):
                 yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
-                    id="cleanup", type="function", function=FunctionCall(name="bash", arguments={"command": "rm -rf cache"}),
+                    id="cleanup", type="function", function=FunctionCall(name="bash", arguments={"command": command_text}),
                 )])
             else:
                 async for event in super().generate_stream(messages, tools, **kwargs):
@@ -53,7 +59,7 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
     old_session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     (tmp_path / "cache").mkdir()
     tool = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
-    command = {"command": "rm -rf cache"}
+    command = {"command": command_text}
     cleanup = asyncio.create_task(
         tool.execute(**command) if direct_bash else agent.prompt(SimpleNamespace(
             sessionId=old_session.sessionId, prompt=[{"text": "cleanup cache"}],
@@ -79,11 +85,15 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direct_bash", [False, True])
-async def test_cancelled_reference_check_never_executes_pending_cleanup(tmp_path, monkeypatch, direct_bash):
+@pytest.mark.parametrize("python_script", [False, True], ids=["shell", "python-runtime"])
+async def test_cancelled_reference_check_never_executes_pending_cleanup(tmp_path, monkeypatch, direct_bash, python_script):
     import box_agent.tools.chat_references as references
     from box_agent.tools.base import ToolInvocationContext
     from box_agent.tools.engine.execution import invoke_tool_once
 
+    script = tmp_path / "cleanup.py"
+    script.write_text("import os\nos.rmdir('cache')\n")
+    command_text = shlex.join([sys.executable, str(script)]) if python_script else "rm -rf cache"
     entered, release = threading.Event(), threading.Event()
     def slow_scan(path):
         entered.set()
@@ -93,7 +103,7 @@ async def test_cancelled_reference_check_never_executes_pending_cleanup(tmp_path
     folder = tmp_path / "cache"
     folder.mkdir()
     tool = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
-    command = {"command": "rm -rf cache"}
+    command = {"command": command_text}
     task = asyncio.create_task(tool.execute(**command) if direct_bash else invoke_tool_once(
         tool, command, ToolInvocationContext(chat_references=references.ChatReferences(tmp_path)),
     ))
