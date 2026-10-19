@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -145,8 +146,7 @@ def _format_bash_result_content(
     return output or "(no output)"
 
 
-# Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
-_POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
+# Shells supporting the explicit pipeline failure contract.
 _PIPEFAIL_SHELLS = frozenset({"bash", "zsh", "ksh"})
 _LARK_CLI_RE = re.compile(
     r"(?:\blark-cli(?:\.(?:cmd|exe))?\b|\$BOX_AGENT_LARK_CLI\b|\$\{BOX_AGENT_LARK_CLI\}|%BOX_AGENT_LARK_CLI%)",
@@ -238,19 +238,18 @@ def _path_requires_write_permission(command: str, path: str) -> bool:
 
 
 def _resolve_login_shell() -> str:
-    """Return a POSIX-compatible login shell path.
+    """Resolve Bash regardless of the user's interactive shell.
 
-    Uses ``$SHELL`` if it names a known POSIX shell **and** the path exists
-    and is executable; otherwise walks a fallback chain.  This avoids
-    failures from stale paths (Nix store, shell upgrades, devcontainers).
+    The tool and bundled Skills advertise Bash syntax. In particular, zsh's
+    equals expansion and glob rules must not change that execution contract.
+    The inherited environment still supplies the user's prepared PATH.
     """
     shell = os.environ.get("SHELL", "")
-    if shell and os.path.basename(shell) in _POSIX_SHELLS and os.access(shell, os.X_OK):
-        return shell
-    for fallback in ("/bin/bash", "/bin/sh"):
-        if os.access(fallback, os.X_OK):
-            return fallback
-    return "/bin/sh"  # last resort — always present on Unix
+    candidates = (shell, "/bin/bash", "/usr/bin/bash", shutil.which("bash") or "")
+    for candidate in candidates:
+        if candidate and os.path.basename(candidate) == "bash" and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("BASH_NOT_FOUND: the bash tool requires Bash on Unix")
 
 
 def _detect_lark_user_mode_violation(command: str) -> str | None:
@@ -991,10 +990,8 @@ class BashTool(Tool):
                 self.shell_name, self._bundled_win_bash,
                 getattr(sys, "frozen", False), self._bundled_win_path_dirs,
             )
-        # Unix: resolve login shell so subprocess inherits user's PATH.
-        # Only trust known POSIX-compatible shells; fall back to /bin/bash
-        # for fish, csh, and other non-POSIX shells whose syntax is
-        # incompatible with the commands the LLM generates.
+        # Unix: keep the advertised Bash syntax independent of $SHELL.
+        # PATH and managed runtime environment are inherited as before.
         if not self.is_windows:
             self._login_shell = _resolve_login_shell()
         self.workspace_dir = workspace_dir
@@ -1150,8 +1147,8 @@ class BashTool(Tool):
     ) -> asyncio.subprocess.Process:
         """Create subprocess with platform-appropriate shell.
 
-        On Windows uses PowerShell; on Unix uses the user's login shell
-        (``$SHELL -l -c``) so that PATH from profile scripts is inherited.
+        On Windows uses PowerShell; on Unix uses Bash (independent of $SHELL)
+        (``bash -l -c``) so that PATH from Bash profile scripts is inherited.
         When a sandbox venv is active, ``-l`` is omitted to keep the venv
         PATH authoritative.
         """

@@ -1275,7 +1275,7 @@ async def test_unix_login_shell_execution():
 
 
 def test_resolve_login_shell_posix():
-    """Known POSIX shells that exist should be used directly."""
+    """An interactive shell never changes the advertised Bash contract."""
     import os
     import platform
     if platform.system() == "Windows":
@@ -1287,7 +1287,7 @@ def test_resolve_login_shell_posix():
     for shell in ("/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh", "/bin/dash"):
         if os.access(shell, os.X_OK):
             with unittest.mock.patch.dict(os.environ, {"SHELL": shell}):
-                assert _resolve_login_shell() == shell
+                assert Path(_resolve_login_shell()).name == "bash"
 
 
 def test_resolve_login_shell_non_posix_falls_back():
@@ -1953,3 +1953,16 @@ async def test_background_output_truncated_when_oversize():
         except Exception:
             pass
         _ = bg_shell_cls  # silence unused
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix Bash contract")
+async def test_zsh_login_does_not_change_bash_syntax(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+    result = await tool.execute(command="echo ===\nprintf '%s' \"$BASH_VERSION\"")
+    assert result.success, result.error
+    assert result.stdout.startswith("===\n")
+    assert result.stdout.strip().splitlines()[1]
+    missing = await tool.execute(command="printf 'abc\n' | grep no_such_pattern | head -20")
+    assert not missing.success  # pipefail remains part of the tool contract.
