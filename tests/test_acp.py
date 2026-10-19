@@ -243,7 +243,7 @@ def test_acp_context_summary_routes_auto_by_tags_and_locks_manual_model(tmp_path
 
     assert len(main_llm.clones) == 1
     assert summary_llm.model == "summary-model"
-    assert summary_llm.max_output_tokens == 4_096
+    assert summary_llm.max_output_tokens == 8_192
 
     manual_llm = CloneTrackingLLM()
     locked_summary_llm = agent._summary_llm_for_session(

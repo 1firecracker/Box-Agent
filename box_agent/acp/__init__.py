@@ -177,6 +177,9 @@ from box_agent.client_info import ClientInfo, scoped_client_info
 from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.llm.base import closing_llm_stream
 from box_agent.llm.model_routing import normalize_auto_routing, resolve_model_client
+from box_agent.llm.task_budgets import (
+    SMALL_TASK_MAX_OUTPUT_TOKENS, TITLE_MAX_OUTPUT_TOKENS, lightweight_output_budget,
+)
 from box_agent.llm.model_profiles import client_for_model_profile
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.runtime import invoke_tool_with_permissions
@@ -1014,8 +1017,8 @@ class SessionState(AgentSession):
         await super().aclose()
 
 
-_CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
-_TITLE_MAX_OUTPUT_TOKENS = 8_000
+_CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
+_TITLE_MAX_OUTPUT_TOKENS = TITLE_MAX_OUTPUT_TOKENS
 _CONNECTOR_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CONNECTOR_STATUS_VALUES = frozenset({"connected", "disconnected"})
 _MAX_CONNECTOR_STATUSES = 256
@@ -3789,7 +3792,7 @@ class BoxACPAgent:
             except (TypeError, ValueError):
                 return {"error": {"code": "invalid_args", "message": "timeoutMs must be a number"}}
 
-        max_output_tokens_cap = None
+        max_output_tokens_cap = lightweight_output_budget(str(purpose), prompt)
         if "title" in normalized_purpose:
             routing_tags = ("summary", "rewrite", "fast")
             routing_ability = 1
@@ -4512,6 +4515,7 @@ class BoxACPAgent:
                 strategy="utility",
                 task_tags=("general", "chat", "fast"),
                 required_ability_level=1,
+                max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
             )
             try:
                 result = await run_lightweight_prompt(

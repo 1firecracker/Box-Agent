@@ -27,6 +27,9 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from .llm.model_routing import resolve_model_client
+from .llm.task_budgets import (
+    SMALL_TASK_MAX_OUTPUT_TOKENS, replacement_output_budget, require_complete_response,
+)
 from .user_paths import configured_box_agent_home, default_memory_dir, state_path
 
 if TYPE_CHECKING:
@@ -37,7 +40,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_OPENCLAW_IMPORT_MAX_OUTPUT_TOKENS = 4_096
+_OPENCLAW_IMPORT_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
 
 
 # ── Token / Jaccard helpers (shared with MemoryMaintainer) ──────
@@ -1602,6 +1605,7 @@ class MemoryManager:
                 ],
                 call_kind="memory_extract",
             )
+            require_complete_response(response)
             filtered = response.content.strip()
         except Exception:
             logger.exception("Failed to filter OpenClaw memory via LLM")
@@ -1678,6 +1682,7 @@ class MemoryManager:
                 strategy="utility",
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
+                max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
             )
             response = await memory_llm.generate(
                 messages=[
@@ -1686,6 +1691,7 @@ class MemoryManager:
                 ],
                 call_kind="memory_extract",
             )
+            require_complete_response(response)
             data = json.loads(_strip_json_fences(response.content))
         except Exception:
             logger.exception("Context memory update planning failed; falling back to append")
@@ -1988,6 +1994,7 @@ class MemoryManager:
                 strategy="utility",
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
+                max_output_tokens_cap=replacement_output_budget(current_core),
             )
             response = await memory_llm.generate(
                 messages=[
@@ -1998,6 +2005,7 @@ class MemoryManager:
                 thinking_enabled=False,
                 call_kind="memory_extract",
             )
+            require_complete_response(response)
         except Exception as exc:  # noqa: BLE001 — planner is best-effort
             logger.warning("plan_promotion: LLM call failed: %s", exc)
             return None
@@ -2798,6 +2806,7 @@ class MemoryExtractor:
             strategy="utility",
             task_tags=("summary", "analysis"),
             required_ability_level=1,
+            max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
         )
         response = await memory_llm.generate(
             messages=[
@@ -2809,6 +2818,7 @@ class MemoryExtractor:
             call_kind="memory_extract",
         )
 
+        require_complete_response(response)
         await asyncio.to_thread(
             self._apply_updates,
             response.content,

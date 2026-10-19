@@ -71,6 +71,7 @@ from box_agent.goal_runtime import (
 )
 from box_agent.turn_runtime import sync_skill_cache_fingerprint_context
 from box_agent.llm.model_routing import resolve_model_client
+from box_agent.llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
 from box_agent.tools.base import Tool
@@ -121,7 +122,7 @@ from box_agent.session_log import SessionLog, default_session_root
 from box_agent.user_paths import state_path
 
 
-_CLI_PROBE_MAX_OUTPUT_TOKENS = 4_096
+_CLI_PROBE_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
 
 
 def run_setup_wizard(config_path: Path) -> bool:

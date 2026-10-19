@@ -649,7 +649,7 @@ def test_cli_api_probe_is_capped_and_disables_thinking(monkeypatch) -> None:
     response = asyncio.run(cli._probe_llm_api(client))
 
     assert response.content == "ok"
-    assert captured["max_output_tokens_cap"] == 4_096
+    assert captured["max_output_tokens_cap"] == 8_192
     assert client.kwargs["call_kind"] == "utility"
     assert client.kwargs["thinking_enabled"] is False
     assert client.kwargs["messages"][0].role == "user"
