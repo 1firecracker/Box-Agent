@@ -104,6 +104,19 @@ def test_scratch_cleanup_preserves_images_already_referenced_by_chat(tmp_path: P
     assert metadata_path(image).exists()
 
 
+def test_scratch_cleanup_preserves_directories_with_incomplete_retention_checks(tmp_path, monkeypatch):
+    import box_agent.artifact_publication as publication
+
+    scratch = prepare_skill_scratch_dir(tmp_path)
+    folder = scratch.path / "cache"
+    folder.mkdir()
+    for i in range(4):
+        (folder / str(i)).write_text("keep")
+    monkeypatch.setattr(publication, "_REFERENCE_SCAN_MAX_ENTRIES", 2)
+    assert cleanup_skill_scratch_dir(scratch) == []
+    assert len(list(folder.iterdir())) == 4
+
+
 def test_prepare_skill_scratch_dir_rejects_root_outside_workspace(
     tmp_path: Path,
 ) -> None:

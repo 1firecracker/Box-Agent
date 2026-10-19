@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
-from .chat_references import chat_mutation_error, mutations
+from .chat_references import bash_chat_mutation_error
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
 from .pptx_safety import (
@@ -1676,13 +1676,12 @@ Examples:
                     exit_code=1,
                 )
 
-            for mutation in mutations("bash", {"command": command}, Path(self.workspace_dir or ".")):
-                denied = chat_mutation_error(mutation.path, mutation.operation)
-                if denied is not None:
-                    error = denied.error
-                    return BashOutputResult(
-                        success=False, error=error, stdout="", stderr=error, exit_code=1,
-                    )
+            denied = await asyncio.to_thread(bash_chat_mutation_error, command, Path(self.workspace_dir or "."))
+            if denied is not None:
+                error = denied.error
+                return BashOutputResult(
+                    success=False, error=error, stdout="", stderr=error, exit_code=1,
+                )
 
             # 1. Only an explicitly trusted full-access session may bypass the
             # approval prompt. Hard product blocks above and deletion backups remain.

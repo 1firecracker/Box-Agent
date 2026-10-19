@@ -7,6 +7,8 @@ cross-tool cache; they never establish that a file is disposable.
 from __future__ import annotations
 
 import ast
+import asyncio
+from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from xml.etree import ElementTree
 
 from ..artifact_publication import (
     metadata_path, read_metadata, retain_chat_file, retained_chat_file_in,
+    retained_chat_files_in, ChatReferenceScanError,
 )
 from .base import ToolResult
 from .shell_inspection import inspect_shell_command
@@ -127,12 +130,105 @@ class Mutation:
     operation: str
 
 
+def _fresh_temporary_cleanup_calls(tree: ast.AST) -> set[int]:
+    """Recognize only local, un-reassigned NamedTemporaryFile paths.
+
+    A converter may contain cleanup in another format's branch. Its newly
+    allocated temporary file cannot name a pre-existing chat reference.
+    Unknown paths and reassigned variables still take the strict path check.
+    """
+    factories, constructors = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            factories.update(f"{alias.asname or alias.name}.NamedTemporaryFile" for alias in node.names if alias.name == "tempfile")
+            constructors.update(f"{alias.asname or alias.name}.Path" for alias in node.names if alias.name == "pathlib")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "tempfile":
+                factories.update(alias.asname or alias.name for alias in node.names if alias.name == "NamedTemporaryFile")
+            elif node.module == "pathlib":
+                constructors.update(alias.asname or alias.name for alias in node.names if alias.name == "Path")
+    shadowed = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
+    shadowed.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
+    shadowed.update(node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    shadowed.update(node.value.id for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name))
+    imports = Counter(alias.asname or alias.name.split('.')[0] for node in ast.walk(tree)
+                      if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names)
+    shadowed.update(name for name, count in imports.items() if count > 1)
+    if "*" in imports:
+        return set()
+    factories = {name for name in factories if name.split('.')[0] not in shadowed}
+    constructors = {name for name in constructors if name.split('.')[0] not in shadowed}
+
+    def call_name(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            return f"{node.value.id}.{node.attr}"
+        return ""
+
+    safe = set()
+    scopes = [tree, *(node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))]
+    for scope in scopes:
+        nodes, pending = [], list(ast.iter_child_nodes(scope))
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            nodes.append(node)
+            pending.extend(ast.iter_child_nodes(node))
+        assignments: dict[str, list[ast.AST | None]] = {}
+        for node in nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        assignments.setdefault(target.id, []).append(node.value)
+        # Loops, arguments, destructuring and attribute writes cannot establish
+        # ownership of a temporary path or its factory.
+        stores = Counter(node.id for node in ast.walk(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)))
+        invalid = {node.arg for node in nodes if isinstance(node, ast.arg)}
+        invalid.update(name for name, values in assignments.items() if stores[name] != len(values))
+        invalid.update(node.value.id for node in nodes if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name))
+        handles = {name for name, values in assignments.items() if name not in invalid and len(values) == 1
+                   and isinstance(values[0], ast.Call) and call_name(values[0].func) in factories
+                   and call_name(values[0].func).split('.')[0] not in assignments}
+        parents = {id(child): node for node in ast.walk(scope) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(scope):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in handles:
+                parent = parents.get(id(node))
+                if not (isinstance(parent, ast.Attribute) and isinstance(parent.ctx, ast.Load) and parent.attr in {"name", "close"}):
+                    handles.discard(node.id)
+
+        def fresh_path(node):
+            if isinstance(node, ast.Attribute) and node.attr == "name" and isinstance(node.value, ast.Name):
+                return node.value.id in handles
+            return (isinstance(node, ast.Call) and call_name(node.func) in constructors
+                    and len(node.args) == 1 and not node.keywords and fresh_path(node.args[0]))
+
+        paths = {name for name, values in assignments.items() if name not in invalid
+                 and any(fresh_path(value) for value in values)
+                 and all(fresh_path(value) or isinstance(value, ast.Constant) and value.value is None for value in values)}
+        for node in nodes:
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr == "unlink":
+                target = node.func.value
+            elif call_name(node.func) in {"os.unlink", "os.remove"} and node.args:
+                target = node.args[0]
+            else:
+                continue
+            if fresh_path(target) or isinstance(target, ast.Name) and target.id in paths:
+                safe.add(id(node))
+    return safe
+
+
 def _python_mutations(code: str, root: Path, *, strict=False) -> list[Mutation]:
     """Resolve literal/assigned paths; the kernel audit hook checks dynamic I/O."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return []
+    temporary_cleanups = _fresh_temporary_cleanup_calls(tree)
     values: dict[str, str] = {}
     path_objects: set[str] = set()
     filesystem_modules = {"os", "shutil"}
@@ -181,6 +277,8 @@ def _python_mutations(code: str, root: Path, *, strict=False) -> list[Mutation]:
                     if is_path(node.value):
                         path_objects.add(target.id)
         if not isinstance(node, ast.Call):
+            continue
+        if id(node) in temporary_cleanups:
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
         if isinstance(node.func, ast.Name):
@@ -296,6 +394,7 @@ class ChatReferences:
         self.denials: set[tuple[str, str]] = self._authority.denials if self._authority else set()
         self._restore()
         self._seen_assistant_messages = {id(message) for message in self.messages if getattr(message, "role", "") == "assistant"}
+        self._check_lock = asyncio.Lock()
 
     def _append(self, kind: str, data: dict) -> None:
         if self.log is not None and callable(getattr(self.log, "append", None)):
@@ -418,10 +517,7 @@ class ChatReferences:
                         result.add(ref)
         if not path.name:
             return result
-        markers = path.rglob(".*.artifact.json") if path.is_dir() else [metadata_path(path)]
-        for marker in markers:
-            if read_metadata(marker).get("retain_for_chat") is True:
-                result.add(marker.with_name(marker.name[1:-len(".artifact.json")]).resolve())
+        result.update(retained_chat_files_in(path))
         return result
 
     def _user_request(self) -> str:
@@ -455,7 +551,7 @@ class ChatReferences:
                         return True
         return False
 
-    def check(self, name: str, arguments: dict, approval: dict | None = None) -> tuple[ToolResult | None, frozenset[Path]]:
+    def _prepare_check(self) -> None:
         if self._authority is not None:
             self.paths.update(self._authority.paths)
         # Assistant links can be emitted between tools in the same run, without
@@ -464,9 +560,23 @@ class ChatReferences:
             if getattr(message, "role", "") == "assistant" and id(message) not in self._seen_assistant_messages:
                 self.retain_text(message.content)
                 self._seen_assistant_messages.add(id(message))
-        changes = mutations(name, arguments, self.root)
-        impacted = [(change, self.paths.copy() if change.operation == "unresolved" else self.affected(change.path)) for change in changes]
-        impacted = [(change, refs) for change, refs in impacted if refs or retained_chat_file_in(change.path)]
+
+    def check(self, name: str, arguments: dict, approval: dict | None = None) -> tuple[ToolResult | None, frozenset[Path]]:
+        self._prepare_check()
+        return self._check_mutations(name, arguments, approval)
+
+    def _check_mutations(self, name: str, arguments: dict, approval: dict | None) -> tuple[ToolResult | None, frozenset[Path]]:
+        impacted = []
+        try:
+            changes = dict.fromkeys(mutations(name, arguments, self.root))
+            for change in changes:
+                refs = self.paths.copy() if change.operation == "unresolved" else self.affected(change.path)
+                if not refs and (retained := retained_chat_file_in(change.path)):
+                    refs.add(retained)
+                if refs:
+                    impacted.append((change, refs))
+        except ChatReferenceScanError as exc:
+            return ToolResult(success=False, error=str(exc)), frozenset()
         if not impacted:
             return None, frozenset()
         request_hash = hashlib.sha256(self._user_request().encode()).hexdigest()
@@ -500,6 +610,21 @@ class ChatReferences:
         if isinstance(approval, dict) and approval.get("chat_reference_delete") == request["chat_reference_delete"]:
             return None, frozenset(paths)
         return ToolResult(success=False, error="CHAT_REFERENCE_DELETE_CONFIRMATION_REQUIRED", permission_request=request), frozenset()
+
+    async def acheck(self, name: str, arguments: dict, approval: dict | None = None) -> tuple[ToolResult | None, frozenset[Path]]:
+        """Keep cleanup scans off the event loop and serialize guard state."""
+        async with self._check_lock:
+            # Reference/Session Log commits stay on the run's event loop;
+            # only read-only filesystem inspection runs on a worker.
+            self._prepare_check()
+            task = asyncio.create_task(asyncio.to_thread(self._check_mutations, name, arguments, approval))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # A cancelled scan must settle before another check mutates the
+                # same reference cache; it never authorizes tool execution.
+                await asyncio.shield(task)
+                raise
 
     def deleted(self, paths: frozenset[Path]) -> None:
         gone = {path for path in paths if not path.exists()}
@@ -538,10 +663,20 @@ def chat_mutation_error(path: Path, operation="write") -> ToolResult | None:
         return None
     path = path.resolve()
     current = _CURRENT.get()
-    protected = current[0].affected(path) if current else set()
-    retained = retained_chat_file_in(path)
+    try:
+        protected = current[0].affected(path) if current else set()
+        retained = None if protected else retained_chat_file_in(path)
+    except ChatReferenceScanError as exc:
+        return ToolResult(success=False, error=str(exc))
     if not protected and retained is None:
         return None
     if operation == "delete" and current and path in current[1]:
         return None
     return ToolResult(success=False, error=f"CHAT_REFERENCE_PROTECTED: keep {path} available to chat; do not {operation} it as cleanup. Normal edits and appends are allowed.")
+
+
+def bash_chat_mutation_error(command: str, workspace: Path) -> ToolResult | None:
+    for mutation in dict.fromkeys(mutations("bash", {"command": command}, workspace)):
+        if denied := chat_mutation_error(mutation.path, mutation.operation):
+            return denied
+    return None

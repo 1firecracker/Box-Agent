@@ -8,7 +8,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..artifact_publication import retained_chat_file_in
+from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
 
 SKILL_SCRATCH_DIR_NAME = ".box-agent-scratch"
@@ -104,7 +104,11 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
 
     removed: list[str] = []
     for entry in scratch_dir.iterdir():
-        if retained_chat_file_in(entry) is not None:
+        try:
+            retained = retained_chat_file_in(entry)
+        except ChatReferenceScanError:
+            continue
+        if retained is not None:
             continue
         entry_mode = entry.lstat().st_mode
         if stat.S_ISDIR(entry_mode) and not stat.S_ISLNK(entry_mode):

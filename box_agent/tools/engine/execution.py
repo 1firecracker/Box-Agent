@@ -53,7 +53,7 @@ async def invoke_tool_once(
             return tool._invalid_schema_result()
         if issues:
             return tool._invalid_arguments_result(issues)
-        denied, allowed_deletions = guard.check(tool.name, arguments, approved_permission_request)
+        denied, allowed_deletions = await guard.acheck(tool.name, arguments, approved_permission_request)
         if denied is not None:
             denied._invocation_rejected = True
             context.budget_charge.release_unexecuted()

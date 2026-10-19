@@ -8,11 +8,18 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Iterable
+from typing import Iterable, Iterator
+from time import monotonic
 
 SUFFIX = ".artifact.json"
 STAGING_DIRECTORY = ".box-agent-staging"
 MAX_HASH_BYTES = 64 * 1024 * 1024
+_REFERENCE_SCAN_MAX_ENTRIES = 10_000
+_REFERENCE_SCAN_TIMEOUT_SECONDS = 0.5
+
+
+class ChatReferenceScanError(RuntimeError):
+    """An incomplete protection check must never authorize deletion."""
 
 
 def is_staging_file(path: Path, workspace: str | Path) -> bool:
@@ -85,21 +92,41 @@ def retain_chat_file(path: Path) -> None:
         write_metadata(path, {**value, "retain_for_chat": True})
 
 
-def retained_chat_file_in(path: Path) -> Path | None:
-    """Find a retained file or sidecar within a proposed mutation target."""
+def retained_chat_files_in(path: Path) -> Iterator[Path]:
+    """Read retention markers with a bounded, non-symlink-following walk."""
     if not path.name:
-        return None
+        return
     marker = path if path.name.startswith(".") and path.name.endswith(SUFFIX) else metadata_path(path)
     if read_metadata(marker).get("retain_for_chat") is True:
-        return path
+        yield path
     for parent in path.parents:
         if parent.name and read_metadata(metadata_path(parent)).get("retain_for_chat") is True:
-            return parent
+            yield parent
     if path.is_dir() and not path.is_symlink():
-        for marker in path.rglob(f".*{SUFFIX}"):
-            if read_metadata(marker).get("retain_for_chat") is True:
-                return marker.with_name(marker.name[1:-len(SUFFIX)])
-    return None
+        deadline = monotonic() + _REFERENCE_SCAN_TIMEOUT_SECONDS
+        pending, count = [path], 0
+        try:
+            while pending:
+                with os.scandir(pending.pop()) as entries:
+                    for entry in entries:
+                        count += 1
+                        if count > _REFERENCE_SCAN_MAX_ENTRIES or monotonic() >= deadline:
+                            raise ChatReferenceScanError(
+                                f"CHAT_REFERENCE_PROTECTED: retention scan incomplete for {path}; preserve it or use a narrower cleanup target"
+                            )
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.name.startswith(".") and entry.name.endswith(SUFFIX):
+                            marker = Path(entry.path)
+                            if read_metadata(marker).get("retain_for_chat") is True:
+                                yield marker.with_name(marker.name[1:-len(SUFFIX)])
+        except OSError as exc:
+            raise ChatReferenceScanError(f"CHAT_REFERENCE_PROTECTED: cannot check retention for {path}; preserve it") from exc
+
+
+def retained_chat_file_in(path: Path) -> Path | None:
+    """Find the first retained file, rejecting incomplete directory scans."""
+    return next(retained_chat_files_in(path), None)
 
 
 def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[str]]:

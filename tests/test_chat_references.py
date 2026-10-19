@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 import zipfile
+import textwrap
 
 import pytest
 
@@ -22,6 +23,97 @@ from box_agent.tools.file_tools import AppendTool, EditTool, WriteTool
 from box_agent.tools.jupyter_tool import _kernel_write_guard_setup_code
 from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.staged_file_write_tool import StagedFileWriteTool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change_directory", [False, True])
+async def test_excel_conversion_allows_cleanup_of_its_new_web_temporary_file(tmp_path, change_directory):
+    source = tmp_path / "source.xlsx"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", "<worksheet><value>42</value></worksheet>")
+    guard = ChatReferences(tmp_path)
+    guard.retain(source)
+    script = tmp_path / "convert.py"
+    script.write_text(textwrap.dedent('''
+        import sys, tempfile, zipfile
+        from pathlib import Path
+
+        def convert(source, destination):
+            emit_result = None
+            if source.startswith('https://'):
+                emit_file = tempfile.NamedTemporaryFile(delete=False)
+                emit_file.close()
+                emit_result = Path(emit_file.name)
+                emit_result.unlink(missing_ok=True)
+                return
+            with zipfile.ZipFile(source) as archive:
+                Path(destination).write_text(archive.read('xl/worksheets/sheet1.xml').decode())
+
+        convert(sys.argv[1], sys.argv[2])
+    '''))
+    output = tmp_path / "converted.md"
+    command = " ".join(map(shlex.quote, [sys.executable, str(script), str(source), str(output)]))
+    if change_directory:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        command = f"cd {shlex.quote(str(scratch))} && {command}"
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=True, bypass_dangerous_command_approval=True)
+
+    result = await invoke_tool_once(tool, {"command": command}, ToolInvocationContext(chat_references=guard))
+
+    assert result.success, result.error
+    assert "42" in output.read_text()
+    assert source.is_file()
+    assert guard.check("bash", {"command": f"rm {shlex.quote(str(source))}"})[0]
+
+
+@pytest.mark.parametrize("cleanup", [
+    "Path('report.pdf').unlink()",
+    "target = Path('report.pdf'); target.unlink()",
+    "temp = tempfile.NamedTemporaryFile(delete=False); target = Path(temp.name); target = Path('report.pdf'); target.unlink()",
+    "temp = tempfile.NamedTemporaryFile(delete=False); temp = type('File', (), {'name': 'report.pdf'})(); Path(temp.name).unlink()",
+    "temp = tempfile.NamedTemporaryFile(delete=False); target = Path(temp.name)\ndef cleanup(target):\n    target.unlink()\ncleanup(Path('report.pdf'))",
+    "tempfile.NamedTemporaryFile = lambda **_: type('File', (), {'name': 'report.pdf'})(); temp = tempfile.NamedTemporaryFile(); Path(temp.name).unlink()",
+    "import pathlib\ndef Path(_):\n    return pathlib.Path('report.pdf')\ntemp = tempfile.NamedTemporaryFile(delete=False); Path(temp.name).unlink()",
+    "temp = tempfile.NamedTemporaryFile(delete=False); setattr(temp, 'name', 'report.pdf'); Path(temp.name).unlink()",
+    "temp = tempfile.NamedTemporaryFile(delete=False)\ndef retarget():\n    temp.name = 'report.pdf'\nretarget()\nPath(temp.name).unlink()",
+    "def cleanup():\n    temp = tempfile.NamedTemporaryFile(delete=False)\n    target = Path(temp.name)\n    def retarget():\n        nonlocal target\n        target = Path('report.pdf')\n    retarget()\n    target.unlink()\ncleanup()",
+])
+def test_external_python_script_cannot_disguise_reference_deletion_as_temporary_cleanup(tmp_path, cleanup):
+    path, guard = referenced(tmp_path)
+    script = tmp_path / "cleanup.py"
+    script.write_text("import tempfile\nfrom pathlib import Path\n" + cleanup)
+    result, allowed = guard.check("bash", {"command": f"python {shlex.quote(str(script))}"})
+    assert result.error.startswith("CHAT_REFERENCE_PROTECTED")
+    assert not allowed
+    assert path.read_text() == "original"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", ["entries", "time", "unreadable"])
+async def test_incomplete_reference_scan_rejects_cleanup_without_deleting_files(tmp_path, monkeypatch, limit):
+    import box_agent.artifact_publication as publication
+
+    if limit == "entries":
+        monkeypatch.setattr(publication, "_REFERENCE_SCAN_MAX_ENTRIES", 3, raising=False)
+    elif limit == "time":
+        ticks = iter([0, 1])
+        monkeypatch.setattr(publication, "monotonic", lambda: next(ticks), raising=False)
+    else:
+        def unreadable(*args, **kwargs):
+            raise PermissionError("unreadable directory")
+        monkeypatch.setattr(publication.os, "scandir", unreadable)
+    folder = tmp_path / "cache"
+    folder.mkdir()
+    for i in range(6):
+        (folder / str(i)).write_text("preserve until checked")
+    guard = ChatReferences(tmp_path)
+    tool = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
+    result = await invoke_tool_once(tool, {"command": "rm -rf cache"}, ToolInvocationContext(chat_references=guard))
+    assert not result.success
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert result.permission_request is None
+    assert len(list(folder.iterdir())) == 6
 
 
 @pytest.fixture(autouse=True)
