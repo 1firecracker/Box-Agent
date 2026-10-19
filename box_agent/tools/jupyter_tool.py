@@ -129,7 +129,7 @@ async def _start_sandbox_kernel(
         raise RuntimeError(f"Sandbox kernel startup failed: {exc}") from exc
 
 
-def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None) -> str:
+def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None, command_guard="") -> str:
     """Build kernel code that confines user writes to artifact/internal roots."""
     roots = (
         workspace.resolve(),
@@ -143,7 +143,7 @@ def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None) -> st
 import os as _box_guard_os
 import sys as _box_guard_sys
 import json as _box_guard_json
-
+{command_guard}
 if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
     def _box_agent_path_is_writable(path):
         try:
@@ -253,8 +253,12 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
             _box_agent_require_writable(args[1])
         elif event == "shutil.rmtree" and args:
             _box_agent_require_writable(args[0], "delete")
-        elif event in {{"os.system", "subprocess.Popen", "os.exec", "os.posix_spawn"}} and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
-            raise PermissionError("CHAT_REFERENCE_PROTECTED: run external commands through bash so reference checks apply")
+        elif event in {{"os.system", "subprocess.Popen", "os.exec", "os.posix_spawn"}}:
+            guard = getattr(_box_guard_sys, "_box_agent_command_guard", None)
+            if guard is not None:
+                guard["_audit_command"](event, args)
+            elif getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: child command check unavailable; preserve files")
 
     _box_guard_sys.addaudithook(_box_agent_write_audit)
     _box_guard_sys._box_agent_write_guard_installed = True
@@ -271,6 +275,13 @@ _box_guard_sys._box_agent_chat_delete = {allowed_deletions!r}
 _KERNEL_WRITE_GUARD_DISABLE_CODE = """
 import sys as _box_guard_sys
 _box_guard_sys._box_agent_write_guard_enabled = False
+_box_guard_sys._box_agent_command_guard = None
+for _box_key, _box_value in getattr(_box_guard_sys, "_box_agent_command_env", {}).items():
+    if _box_value is None:
+        _box_guard_sys.modules["os"].environ.pop(_box_key, None)
+    else:
+        _box_guard_sys.modules["os"].environ[_box_key] = _box_value
+_box_guard_sys._box_agent_command_env = {}
 """
 
 
@@ -280,16 +291,22 @@ def _execute_with_kernel_write_guard(
     timeout: int,
     reference_policy=None,
 ) -> tuple[str, list[str], Optional[str]]:
-    setup_result = session.execute(
-        _kernel_write_guard_setup_code(session.workspace, reference_policy),
-        timeout=min(timeout, 10),
-    )
-    if setup_result[2] is not None:
-        return setup_result
+    from .python_mutation_guard import PythonMutationGuard
+
+    guard = PythonMutationGuard(None)
     try:
+        setup_result = session.execute(
+            _kernel_write_guard_setup_code(session.workspace, reference_policy, guard.kernel_setup_code()),
+            timeout=min(timeout, 10),
+        )
+        if setup_result[2] is not None:
+            return setup_result
         return session.execute(code, timeout)
     finally:
-        session.execute(_KERNEL_WRITE_GUARD_DISABLE_CODE, timeout=5)
+        try:
+            session.execute(_KERNEL_WRITE_GUARD_DISABLE_CODE, timeout=5)
+        finally:
+            guard.close()
 
 # Whitelist of pip package names allowed for on-demand installation in
 # frozen/runtime mode.  Packages NOT in this set are rejected with a clear
@@ -1908,7 +1925,6 @@ Output formats:
         # blocking the event loop (pip installs inside %pip or auto-install can
         # take minutes).  Wrap with an overall timeout as a safety net.
         _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
-        loop = asyncio.get_event_loop()
         from .chat_references import current_chat_policy
         reference_policy = current_chat_policy()
         execute_code = self._execute_session_code
@@ -1917,8 +1933,7 @@ Output formats:
             execute_code = partial(execute_code, reference_policy=reference_policy)
         try:
             stdout, images, error = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
+                asyncio.to_thread(
                     execute_code,
                     session,
                     code,
@@ -1935,8 +1950,7 @@ Output formats:
                     ok, _ = await env.install_packages([pip_name])
                     if ok:
                         stdout, images, error = await asyncio.wait_for(
-                            loop.run_in_executor(
-                                None,
+                            asyncio.to_thread(
                                 execute_code,
                                 session,
                                 code,

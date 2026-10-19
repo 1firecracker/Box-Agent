@@ -25,10 +25,8 @@ _ENDPOINT = "BOX_AGENT_PYTHON_MUTATION_GUARD"
 _MAX_MESSAGE = 128 * 1024
 
 # No project imports: this code runs in the user's Python, not the ACP Python.
-_BOOTSTRAP = r'''
+_CLIENT_CODE = r'''
 import json as _json, os as _os, shlex as _shlex, socket as _socket, sys as _sys
-
-_endpoint = _json.loads(_os.environ["BOX_AGENT_PYTHON_MUTATION_GUARD"])
 
 def _check(**request):
     request["token"] = _endpoint["token"]
@@ -61,7 +59,7 @@ def _command(command, cwd=None, env=None, executable=None):
     # would authorize dynamic deletion in an unguarded Python grandchild.
     inherited = _os.environ if env is None else {_os.fsdecode(k): _os.fsdecode(v) for k, v in env.items()}
     if (inherited.get("BOX_AGENT_PYTHON_MUTATION_GUARD") != _json.dumps(_endpoint)
-            or _os.path.dirname(__file__) not in inherited.get("PYTHONPATH", "").split(_os.pathsep)):
+            or _guard_directory not in inherited.get("PYTHONPATH", "").split(_os.pathsep)):
         raise PermissionError("CHAT_REFERENCE_PROTECTED: preserve Python deletion guard in child environment")
     if isinstance(command, (list, tuple)):
         if executable:
@@ -69,21 +67,27 @@ def _command(command, cwd=None, env=None, executable=None):
         command = _shlex.join([_os.fsdecode(arg) for arg in command])
     _check(kind="command", command=_os.fsdecode(command), cwd=_os.path.abspath(cwd or _os.getcwd()))
 
+def _audit_command(event, args):
+    if event == "subprocess.Popen":
+        _command(args[1], args[2], args[3], args[0])
+    elif event == "os.system":
+        _command(args[0])
+    elif event in ("os.exec", "os.posix_spawn"):
+        _command(args[1], env=args[2], executable=args[0])
+'''
+
+_BOOTSTRAP = ("import json, os\n_endpoint = json.loads(os.environ[" + repr(_ENDPOINT)
+              + "])\n_guard_directory = os.path.dirname(__file__)\n" + _CLIENT_CODE + r'''
 def _audit(event, args):
     if event in ("os.remove", "os.rmdir"):
         _check(kind="mutation", path=_path(args[0], args[1]), operation="delete")
     elif event == "shutil.rmtree":
         _check(kind="mutation", path=_path(args[0], args[1]), operation="delete")
     elif event == "os.rename":
-        # Replacing a published destination is an edit; moving its source away
-        # breaks the old chat link. Only the source is a destructive mutation.
+        # Replacing a published destination is an edit; only its source moves.
         _check(kind="mutation", path=_path(args[0], args[2]), operation="move")
-    elif event == "subprocess.Popen":
-        _command(args[1], args[2], args[3], args[0])
-    elif event == "os.system":
-        _command(args[0])
-    elif event in ("os.exec", "os.posix_spawn"):
-        _command(args[1], env=args[2], executable=args[0])
+    else:
+        _audit_command(event, args)
 
 _sys.addaudithook(_audit)
 
@@ -93,7 +97,7 @@ _own_directory = _os.path.dirname(__file__)
 _spec = _machinery.PathFinder.find_spec("sitecustomize", [p for p in _sys.path if p != _own_directory])
 if _spec and _spec.loader:
     _spec.loader.exec_module(_util.module_from_spec(_spec))
-'''
+''')
 
 
 def uses_python(command: str) -> bool:
@@ -193,6 +197,19 @@ class PythonMutationGuard:
         except BaseException:
             self._directory.cleanup()
             raise
+
+    def kernel_setup_code(self) -> str:
+        """Share command checks and guarded child startup with a Jupyter kernel."""
+        environment = {key: self.environment[key] for key in (_ENDPOINT, "PYTHONPATH")}
+        namespace = {"_endpoint": json.loads(environment[_ENDPOINT]),
+                     "_guard_directory": self._directory.name}
+        return f"""
+_box_guard_sys._box_agent_command_guard = {namespace!r}
+exec({_CLIENT_CODE!r}, _box_guard_sys._box_agent_command_guard)
+_box_guard_sys._box_agent_command_env = {{key: _box_guard_os.environ.get(key) for key in {list(environment)!r}}}
+_box_guard_os.environ[{_ENDPOINT!r}] = {environment[_ENDPOINT]!r}
+_box_guard_os.environ["PYTHONPATH"] = {self._directory.name!r} + (_box_guard_os.pathsep + _box_guard_sys._box_agent_command_env["PYTHONPATH"] if _box_guard_sys._box_agent_command_env["PYTHONPATH"] else "")
+"""
 
     def close(self) -> None:
         self._server.shutdown()
