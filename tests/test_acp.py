@@ -3689,7 +3689,7 @@ async def test_acp_seeds_negotiated_session_continuation_once(
             field_meta={"session_id": "stable-product-session"},
         )
     )
-    assert session.field_meta["capabilities"]["session_continuation_versions"] == [1]
+    assert session.field_meta["capabilities"]["session_continuation_versions"] == [1, 2]
 
     continuation = {
         "schema_version": "officev3-session-continuation/v1",
@@ -5293,7 +5293,7 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
     assert "会生成多份相关文件" not in state.agent.system_prompt
     assert session.field_meta == {
         "capabilities": {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
     }
@@ -7081,7 +7081,7 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
 
     assert session.field_meta == {
         "capabilities": {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
     }

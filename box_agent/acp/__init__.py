@@ -186,7 +186,7 @@ from box_agent.session_trace import (
 )
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
-from box_agent.session_continuation import parse_session_continuation
+from box_agent.session_continuation import HISTORY_EDIT_SCHEMA_VERSION, parse_session_continuation
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -2285,7 +2285,7 @@ class BoxACPAgent:
         kwargs: dict[str, Any] = {"sessionId": session_id}
         response_meta: dict[str, Any] = {}
         response_meta["capabilities"] = {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
         if skillhub_search_enabled:
@@ -2630,10 +2630,17 @@ class BoxACPAgent:
                 context_token_limit=requested_token_limit,
             )
         if state.turn_counter == 0 and not state.continuation_applied:
-            continuation = parse_session_continuation(
-                prompt_meta.get("session_continuation")
-                or prompt_meta.get("sessionContinuation")
+            raw_continuation = prompt_meta.get("session_continuation") or prompt_meta.get(
+                "sessionContinuation"
             )
+            continuation = parse_session_continuation(raw_continuation)
+            if (
+                isinstance(raw_continuation, dict)
+                and raw_continuation.get("schema_version") == HISTORY_EDIT_SCHEMA_VERSION
+                and continuation is not None
+                and continuation.product_session_id != state.upstream_session_id
+            ):
+                raise ValueError("HISTORY_EDIT_SESSION_MISMATCH")
             state.continuation_applied = True
             if (
                 continuation is not None
