@@ -454,6 +454,10 @@ uv run box-agent-build-runtime
 uv run box-agent-build-runtime --mac-all --version 0.9.13 --dry-run
 uv run box-agent-build-runtime --mac-all --version 0.9.13
 
+# Build both archives directly into Lab's desktop dist/runtime (no host runtime replacement).
+uv run box-agent-build-runtime --mac-all-lab --version 1.0.0 --dry-run
+uv run box-agent-build-runtime --mac-all-lab --version 1.0.0
+
 # Build macOS Intel/x64 runtime from Apple Silicon
 # Requires a separate x86_64 venv because PyInstaller cannot bundle arm64 wheels into an x64 binary.
 # One-time setup:
@@ -478,6 +482,13 @@ the same Python major/minor and PyInstaller version. `--dry-run` checks prerequi
 without building. This mode requires an explicit stable version and cannot be combined
 with `--target`, `--arch`, `--install-officev3` or `--install-lab`.
 See the [dual-architecture workflow](docs/PRODUCTION_GUIDE_CN.md#macos-双架构一次构建).
+
+`--mac-all-lab [DIR]` reuses the same dual build and writes to
+`<Lab>/apps/office-desktop/dist/runtime/` by default. It locates Lab using
+`BOX_AGENT_LAB_DIR` or the neighboring checkout; `--output` / `BOX_AGENT_RUNTIME_OUTPUT`
+can override the destination. Then run
+`pnpm desktop:release:mac -- --agent-version 1.0.0 --runtime-dir apps/office-desktop/dist/runtime`
+from the Lab root to build both clients. Neither command uploads artifacts.
 
 ## Testing
 
