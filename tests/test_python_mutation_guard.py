@@ -14,7 +14,7 @@ import pytest
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.bash_tool import BashTool, BackgroundShellManager
 from box_agent.schema import Message
-from box_agent.tools.chat_references import ChatReferences
+from box_agent.tools.chat_references import ChatReferences, bind_chat_references
 from box_agent.tools.engine.execution import invoke_tool_once
 
 
@@ -278,6 +278,38 @@ async def test_shell_cannot_strip_python_guard_environment(tmp_path, retained, p
     assert not result.success
     assert "CHAT_REFERENCE_PROTECTED" in result.error
     assert target.is_file()
+
+
+@pytest.mark.parametrize("with_dir_fd", [False, True])
+@pytest.mark.parametrize("protected", [False, True])
+def test_rmtree_audit_signatures_preserve_deletion_policy(tmp_path, with_dir_fd, protected):
+    from box_agent.tools.python_mutation_guard import PythonMutationGuard
+
+    directory = tmp_path / "files"
+    directory.mkdir()
+    target = directory / "report.txt"
+    target.write_text("keep")
+    references = ChatReferences(tmp_path)
+    if protected:
+        references.retain(target)
+    with bind_chat_references(references):
+        guard = PythonMutationGuard(None)
+    try:
+        # Exercise both Python 3.10 and newer audit signatures on every runner.
+        arguments = ", None" if with_dir_fd else ""
+        result = subprocess.run(
+            [sys.executable, "-c", f"import sys; sys.audit('shutil.rmtree', sys.argv[1]{arguments})",
+             str(directory)],
+            env=guard.environment, capture_output=True, text=True, timeout=5,
+        )
+        if protected:
+            assert result.returncode != 0
+            assert "CHAT_REFERENCE_PROTECTED" in result.stderr
+        else:
+            assert result.returncode == 0, result.stderr
+        assert target.read_text() == "keep"
+    finally:
+        guard.close()
 
 
 @pytest.mark.parametrize("failure", ["closed-endpoint", "broken-bootstrap"])
