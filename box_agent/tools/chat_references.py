@@ -24,7 +24,7 @@ from xml.etree import ElementTree
 
 from ..artifact_publication import (
     metadata_path, read_metadata, retain_chat_file, retained_chat_file_in,
-    retained_chat_files_in, ChatReferenceScanError,
+    retained_chat_files_in, ChatReferenceScanError, is_publication_metadata,
 )
 from .base import ToolResult
 from .shell_inspection import inspect_shell_command
@@ -377,7 +377,8 @@ class ChatReferences:
         pending, closure = [path], set()
         while pending:
             candidate = pending.pop()
-            if candidate in closure:
+            if (candidate in closure or is_publication_metadata(candidate)
+                    or is_publication_metadata(candidate.resolve())):
                 continue
             closure.add(candidate)
             closure.add(candidate.resolve())

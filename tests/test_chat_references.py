@@ -9,7 +9,7 @@ import textwrap
 
 import pytest
 
-from box_agent.artifact_publication import metadata_path, read_metadata, write_metadata
+from box_agent.artifact_publication import metadata_path, read_metadata, retain_chat_file, write_metadata
 from box_agent.core import run_agent_loop
 from box_agent.events import ToolCallResult
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
@@ -23,6 +23,43 @@ from box_agent.tools.file_tools import AppendTool, EditTool, WriteTool
 from box_agent.tools.jupyter_tool import _kernel_write_guard_setup_code
 from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.staged_file_write_tool import StagedFileWriteTool
+
+
+@pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
+def test_protocol_metadata_never_gets_recursive_retention_sidecars(tmp_path, relative):
+    from types import SimpleNamespace
+
+    path = tmp_path / relative
+    path.parent.mkdir()
+    data = '{"type":"intermediate_asset"}'
+    path.write_text(data, encoding="utf-8")
+    guard = ChatReferences(tmp_path)
+    guard.retain(path)
+    guard.retain_text(f"[Workflow metadata]({relative})")
+    guard.retain_output({"type": "artifact", "path": str(path)})
+    retain_chat_file(path)
+    assert guard.paths == set()
+    assert not metadata_path(path).exists()
+    assert path.read_text(encoding="utf-8") == data
+
+    # Preserve existing durable references while refusing to grow a cache of
+    # protocol metadata during session restoration.
+    event = {"type": "chat/reference", "data": {"paths": [str(path)]}}
+    log = SimpleNamespace(events=[event])
+    restored = ChatReferences(tmp_path, session_log=log)
+    assert path in restored.paths
+    assert log.events == [event]
+    assert not metadata_path(path).exists()
+
+
+@pytest.mark.parametrize("relative", [".foo", "data.artifact.json"])
+def test_ordinary_hidden_files_and_json_keep_retention(tmp_path, relative):
+    path = tmp_path / relative
+    path.write_text("user content", encoding="utf-8")
+    guard = ChatReferences(tmp_path)
+    guard.retain(path)
+    assert path in guard.paths
+    assert read_metadata(metadata_path(path))["retain_for_chat"] is True
 
 
 @pytest.mark.asyncio

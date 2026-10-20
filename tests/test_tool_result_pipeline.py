@@ -20,8 +20,9 @@ from box_agent.tools.engine import artifact_results
 
 
 class _OneToolCallLLM:
-    def __init__(self, tool_name: str) -> None:
+    def __init__(self, tool_name: str, arguments: dict | None = None) -> None:
         self._tool_name = tool_name
+        self._arguments = arguments or {}
         self._calls = 0
 
     async def generate(self, **_kwargs):
@@ -37,7 +38,7 @@ class _OneToolCallLLM:
                     ToolCall(
                         id="call-1",
                         type="function",
-                        function=FunctionCall(name=self._tool_name, arguments={}),
+                        function=FunctionCall(name=self._tool_name, arguments=self._arguments),
                     )
                 ],
             )
@@ -64,6 +65,78 @@ class _EchoTool(Tool):
 
     async def execute(self) -> ToolResult:
         return ToolResult(success=True, content="echoed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
+@pytest.mark.parametrize("tool_name", ["write_file", "append_file", "edit_file"])
+async def test_native_protocol_metadata_stays_internal_on_all_artifact_channels(
+    tmp_path, relative, tool_name,
+):
+    from box_agent.acp import _tool_result_raw_output
+    from box_agent.artifact_publication import metadata_path
+    from box_agent.tools.file_tools import AppendTool, EditTool, WriteTool
+
+    target = tmp_path / relative
+    target.parent.mkdir()
+    target.write_text("{}", encoding="utf-8")
+    if tool_name == "edit_file":
+        arguments = {"path": relative, "old_str": "{}", "new_str": '{"type":"artifact"}'}
+    else:
+        arguments = {"path": relative, "content": '\n{"type":"artifact"}'}
+    tool = {"write_file": WriteTool, "append_file": AppendTool, "edit_file": EditTool}[tool_name](str(tmp_path))
+    events = [event async for event in run_agent_loop(
+        llm=_OneToolCallLLM(tool.name, arguments), messages=[Message(role="user", content="Write workflow metadata")],
+        tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path),
+    )]
+    result = next(event for event in events if isinstance(event, ToolCallResult))
+    assert result.success, result.error
+    assert result.raw_output["type"] == "intermediate_asset"
+    assert result.raw_output["file_changes_version"] == 2
+    assert not any(isinstance(event, ArtifactEvent) for event in events)
+    assert not metadata_path(target).exists()
+    assert target not in artifact_results._snapshot_workspace(str(tmp_path))
+    # Neither an explicit text reference nor a raw adapter call bypasses policy.
+    assert artifact_results._detect_tool_artifacts(
+        "script", "bash", f"[{relative}]", None, None, None, str(tmp_path),
+    ) == []
+    raw = _tool_result_raw_output(
+        {"type": "artifact", "path": str(target)}, "done", None,
+        workspace_dir=str(tmp_path), session_id="host", task_id="task", turn_id="turn",
+    )
+    assert raw["type"] == "intermediate_asset"
+    assert raw["session_id"] == "host"
+
+
+@pytest.mark.parametrize("relative", [".foo", ".notes.md", "data.artifact.json"])
+def test_ordinary_hidden_files_and_json_names_remain_structured_artifacts(tmp_path, relative):
+    target = tmp_path / relative
+    target.write_text("user content", encoding="utf-8")
+    events = artifact_results._detect_tool_artifacts(
+        "writer", "write_file", "done", {"type": "artifact", "path": str(target)},
+        None, None, str(tmp_path),
+    )
+    assert [(event.rel_path, event.placement) for event in events] == [(relative, "supporting")]
+
+
+def test_publication_metadata_remains_available_to_private_fingerprint_scans(tmp_path):
+    import hashlib
+    from box_agent.artifact_publication import metadata_path, write_metadata
+
+    target = tmp_path / "working.png"
+    data = b"intermediate image"
+    target.write_bytes(data)
+    marker = metadata_path(target)
+    write_metadata(target, {"type": "intermediate_asset"})
+    scope = tmp_path / ".artifact-delivery.json"
+    scope.write_text('{"schema_version":1,"default":"intermediate"}', encoding="utf-8")
+    assert artifact_results._snapshot_workspace(str(tmp_path)) == {target}
+    assert artifact_results._snapshot_workspace(
+        str(tmp_path), include_publication_metadata=True,
+    ) == {target, marker}
+    assert artifact_results._publication_fingerprints(str(tmp_path)) == {
+        len(data): {hashlib.sha256(data).hexdigest()},
+    }
 
 
 @pytest.mark.asyncio

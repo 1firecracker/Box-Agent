@@ -12,6 +12,7 @@ from typing import Iterable, Iterator
 from time import monotonic
 
 SUFFIX = ".artifact.json"
+SCOPE_FILE = ".artifact-delivery.json"
 STAGING_DIRECTORY = ".box-agent-staging"
 MAX_HASH_BYTES = 64 * 1024 * 1024
 _REFERENCE_SCAN_MAX_ENTRIES = 10_000
@@ -20,6 +21,16 @@ _REFERENCE_SCAN_TIMEOUT_SECONDS = 0.5
 
 class ChatReferenceScanError(RuntimeError):
     """An incomplete protection check must never authorize deletion."""
+
+
+def is_publication_sidecar(path: Path) -> bool:
+    name = path.name
+    return name.startswith(".") and name.endswith(SUFFIX) and len(name) > len(SUFFIX) + 1
+
+
+def is_publication_metadata(path: Path) -> bool:
+    """Reserved publication records are protocol data, never deliverables."""
+    return path.name == SCOPE_FILE or is_publication_sidecar(path)
 
 
 def is_staging_file(path: Path, workspace: str | Path) -> bool:
@@ -87,6 +98,8 @@ def write_metadata(path: Path, value: dict) -> None:
 
 def retain_chat_file(path: Path) -> None:
     """Cache retention without promoting a file's delivery placement."""
+    if is_publication_metadata(path):
+        return
     value = read_metadata(metadata_path(path))
     if value.get("retain_for_chat") is not True:
         write_metadata(path, {**value, "retain_for_chat": True})
@@ -157,6 +170,8 @@ def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[s
 
 
 def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: str | None = None) -> bool:
+    if is_publication_metadata(path):
+        return True
     if workspace and is_staging_file(path, workspace):
         return True
     value = read_metadata(metadata_path(path))
@@ -189,9 +204,6 @@ def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: st
     except OSError:
         pass
     return True
-
-
-SCOPE_FILE = ".artifact-delivery.json"
 
 
 def delivery_scope(path: Path, workspace: str | Path) -> Path | None:
@@ -229,7 +241,7 @@ def apply_delivery_policy(raw_output: dict | None, workspace: str | None) -> dic
     path = Path(value)
     if not path.is_absolute():
         path = Path(workspace) / path
-    if is_staging_file(path, workspace):
+    if is_publication_metadata(path) or is_staging_file(path, workspace):
         return {**raw_output, "type": "intermediate_asset"}
     if is_unpublished_scoped_file(path, workspace):
         if path.is_file():

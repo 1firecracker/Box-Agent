@@ -31,6 +31,13 @@ publish their deliverables with `publish_artifact`; silent workspace writes do
 not become task artifacts. This changes discovery only, not cwd or directory
 allocation. It does not repair already misattributed historical task records.
 
+Successful `write_file`, `staged_file_write`, `append_file`, and `edit_file`
+commits return structured artifact paths, so revisions remain discoverable when
+the workspace scan reaches its file or time limit. This does not publish an
+unmarked file as a primary deliverable: producer metadata still determines
+`primary` / `supporting` placement and suppresses intermediate files. Unchanged
+append/edit operations and failed writes do not announce a new revision.
+
 ### Intermediate files produced by scripts
 
 Producers can keep an output available on disk without automatically publishing
@@ -39,7 +46,8 @@ it to the host. Before writing `slide-01.png`, write the adjacent hidden sidecar
 The marker applies to that exact file, including later revisions. Both output-text
 reference detection and workspace-diff detection honor it; neither guesses from
 directory names or extensions. Missing, malformed, or oversized (>4 KiB) metadata
-does not suppress publication. Sidecars themselves are excluded from publication.
+does not suppress publication. Publication sidecars and `.artifact-delivery.json`
+are protocol metadata: neither becomes an artifact or gets its own retention sidecar.
 
 `generate_image` persists this metadata before returning, including `sha256` and
 `size_bytes`. Discovery enriches script-produced markers with these fields while

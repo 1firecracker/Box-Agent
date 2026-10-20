@@ -1427,12 +1427,19 @@ class AppendTool(FileChangeReceiptMixin, Tool):
             if bypass_error:
                 return ToolResult(success=False, content="", error=bypass_error)
 
+            if existed and not content:
+                return ToolResult(success=True, content=f"Successfully appended to {file_path}")
+
             backup_file(file_path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with file_path.open("a", encoding="utf-8") as f:
                 f.write(content)
             expected = original + content.replace("\n", os.linesep).encode("utf-8")
-            result = ToolResult(success=True, content=f"Successfully appended to {file_path}")
+            result = ToolResult(
+                success=True,
+                content=f"Successfully appended to {file_path}",
+                raw_output={"type": "artifact", "path": str(file_path)},
+            )
             return file_change_result(result, self.workspace_dir.resolve(), file_path,
                                       hashlib.sha256(original).hexdigest() if existed else None,
                                       hashlib.sha256(expected).hexdigest(), verify_current=True)
@@ -1570,14 +1577,21 @@ class EditTool(FileChangeReceiptMixin, Tool):
                     error=f"Text not found in file: {old_str}",
                 )
 
+            new_content = content.replace(old_str, new_str)
+            if new_content == content:
+                return ToolResult(success=True, content=f"Successfully edited {file_path}")
+
             # Backup before editing
             backup_file(file_path)
 
-            new_content = content.replace(old_str, new_str)
             file_path.write_text(new_content, encoding="utf-8")
 
             return file_change_result(
-                ToolResult(success=True, content=f"Successfully edited {file_path}"),
+                ToolResult(
+                    success=True,
+                    content=f"Successfully edited {file_path}",
+                    raw_output={"type": "artifact", "path": str(file_path)},
+                ),
                 self.workspace_dir.resolve(), file_path, hashlib.sha256(original).hexdigest(),
                 hashlib.sha256(new_content.replace("\n", os.linesep).encode("utf-8")).hexdigest(),
                 verify_current=True,

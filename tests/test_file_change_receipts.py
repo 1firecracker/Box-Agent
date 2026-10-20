@@ -367,6 +367,156 @@ async def test_acp_wire_binds_actual_write_to_its_original_tool_and_turn(tmp_pat
     assert finish.rawOutput['session_id'] == 'host-session'
     assert finish.rawOutput['file_changes'] == [{'path': 'own.txt', 'before_sha256': None, 'after_sha256': digest(b'own')}]
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool_name', ['append_file', 'edit_file'])
+@pytest.mark.parametrize('placement', ['primary', 'supporting', 'intermediate', 'scope'])
+async def test_acp_native_revisions_keep_delivery_policy_without_workspace_snapshots(
+    tmp_path, monkeypatch, tool_name, placement,
+):
+    from box_agent.artifact_publication import write_metadata
+    from box_agent.tools.engine.artifact_results import _snapshot_workspace_signatures
+
+    target = tmp_path / 'report.txt'
+    target.write_text('initial', encoding='utf-8')
+    (tmp_path / 'extra.txt').write_text('scan cap trigger', encoding='utf-8')
+    if placement == 'scope':
+        (tmp_path / '.artifact-delivery.json').write_text(
+            '{"schema_version":1,"default":"intermediate"}', encoding='utf-8',
+        )
+    elif placement != 'supporting':
+        write_metadata(target, {
+            'type': 'artifact' if placement == 'primary' else 'intermediate_asset',
+        })
+    monkeypatch.setenv('BOX_AGENT_ARTIFACT_SCAN_MAX_FILES', '1')
+    assert _snapshot_workspace_signatures(str(tmp_path)) is None
+
+    class Connection:
+        def __init__(self):
+            self.updates = []
+
+        async def sessionUpdate(self, payload):
+            self.updates.append(payload.update)
+
+    class Model:
+        calls = 0
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls in {1, 3}:
+                revision = (self.calls + 1) // 2
+                arguments = (
+                    {'path': 'report.txt', 'content': f' append-{revision}'}
+                    if tool_name == 'append_file' else
+                    {'path': 'report.txt', 'old_str': 'initial' if revision == 1 else 'revision-1',
+                     'new_str': f'revision-{revision}'}
+                )
+                yield StreamEvent(type='finish', finish_reason='tool', tool_calls=[
+                    ToolCall(id=f'writer-{revision}', type='function', function=FunctionCall(
+                        name=tool_name, arguments=arguments,
+                    )),
+                ])
+            else:
+                yield StreamEvent(type='text', delta='done')
+                yield StreamEvent(type='finish', finish_reason='stop')
+
+        async def generate(self, messages, tools=None, **kwargs):
+            return LLMResponse(content='done', finish_reason='stop')
+
+    config = Config(
+        llm=LLMConfig(api_key='test'),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_todo=False),
+    )
+    conn = Connection()
+    adapter = BoxACPAgent(conn, config, Model(), [], 'system')
+    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        'session_mode': 'code_agent', 'session_id': 'host-session',
+    }))
+    original_agent = adapter._sessions[session.sessionId].agent
+    if tool_name == 'append_file':
+        activated = await original_agent.tools['tool_search'].invoke({'tool_names': [tool_name]})
+        assert activated.success
+    for revision in (1, 2):
+        offset = len(conn.updates)
+        response = await adapter.prompt(SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{'text': 'revise the report'}],
+            field_meta={'task_id': f'task-{revision}', 'turn_id': f'turn-{revision}'},
+        ))
+        assert response.field_meta['ok'] is True
+        assert adapter._sessions[session.sessionId].agent is original_agent
+        writes = [
+            update.rawOutput for update in conn.updates[offset:]
+            if update.sessionUpdate == 'tool_call_update'
+            and update.toolCallId == f'writer-{revision}'
+            and isinstance(update.rawOutput, dict)
+        ]
+        receipt = next(raw for raw in writes if raw.get('file_changes_version') == 2)
+        assert receipt['session_id'] == 'host-session'
+        assert receipt['task_id'] == f'task-{revision}'
+        assert receipt['turn_id'] == f'turn-{revision}'
+        assert receipt['file_changes'][0]['after_sha256'] == digest(target.read_bytes())
+        artifacts = [raw for raw in writes if raw.get('type') == 'artifact']
+        if placement in {'intermediate', 'scope'}:
+            assert receipt['type'] == 'intermediate_asset'
+            assert artifacts == []
+        else:
+            # Raw tool results use the existing WriteTool shape; the shared
+            # ArtifactEvent adds authoritative producer placement and lineage.
+            assert receipt['type'] == 'artifact'
+            assert 'placement' not in receipt
+            published = [raw for raw in artifacts if 'placement' in raw]
+            assert len(published) == 1
+            artifact = published[0]
+            assert artifact['placement'] == placement
+            assert artifact['rel_path'] == 'report.txt'
+            assert artifact['session_id'] == receipt['session_id']
+            assert artifact['task_id'] == receipt['task_id']
+            assert artifact['turn_id'] == receipt['turn_id']
+            assert artifact['sha256'] == receipt['file_changes'][0]['after_sha256']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool_name', ['append_file', 'edit_file'])
+@pytest.mark.parametrize('outcome', ['noop', 'failure'])
+async def test_native_revisions_do_not_deliver_noops_or_failures(tmp_path, tool_name, outcome):
+    from box_agent.tools.engine.artifact_results import (
+        _detect_tool_artifacts, _snapshot_workspace_signatures,
+    )
+
+    target = tmp_path / 'report.txt'
+    target.write_bytes(b'initial\r\n')
+    (tmp_path / 'directory').mkdir()
+    tool = AppendTool(str(tmp_path)) if tool_name == 'append_file' else EditTool(str(tmp_path))
+    if tool_name == 'append_file':
+        arguments = {'path': 'report.txt' if outcome == 'noop' else 'directory', 'content': ''}
+    else:
+        arguments = {'path': 'report.txt', 'old_str': 'initial' if outcome == 'noop' else 'missing',
+                     'new_str': 'initial'}
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    result = await tool.invoke(arguments)
+    after = _snapshot_workspace_signatures(str(tmp_path))
+    assert result.success is (outcome == 'noop')
+    assert not (result.raw_output or {}).get('file_changes')
+    assert (result.raw_output or {}).get('type') != 'artifact'
+    assert after == before
+    assert target.read_bytes() == b'initial\r\n'
+    assert _detect_tool_artifacts(
+        'writer', tool_name, result.content, result.raw_output, before, after, str(tmp_path),
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_append_still_announces_a_new_empty_file(tmp_path):
+    result = await AppendTool(str(tmp_path)).invoke({'path': 'empty.txt', 'content': ''})
+    assert changes(result) == [{
+        'path': 'empty.txt', 'before_sha256': None, 'after_sha256': digest(b''),
+    }]
+    assert result.raw_output['type'] == 'artifact'
+    assert result.raw_output['path'] == str(tmp_path / 'empty.txt')
+
+
 @pytest.mark.asyncio
 async def test_retargeted_image_waits_for_the_new_destination_lock(tmp_path, monkeypatch):
     from box_agent.tools.image_generation_tool import GenerateImageTool
