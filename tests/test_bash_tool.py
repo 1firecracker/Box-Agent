@@ -1409,6 +1409,8 @@ def test_description_prefers_dedicated_search_tools_over_shell_search(
         bash_tool_module.platform, "system", lambda: "Windows" if windows else "Linux"
     )
     monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    # Only inspect wording; the simulated Unix branch must not need host Bash.
+    monkeypatch.setattr(bash_tool_module, "_resolve_login_shell", lambda: "/bin/bash")
     description = BashTool().description
 
     assert "use glob/grep when available or search_files" in description
