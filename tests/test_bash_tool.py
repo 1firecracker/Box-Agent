@@ -1440,7 +1440,7 @@ async def test_reserved_scratch_subdirectory_can_be_removed_without_approval(tmp
     preview = scratch / "preview_shots"
     preview.mkdir(parents=True)
     (preview / "frame.png").write_bytes(b"frame")
-    tool = BashTool(runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
 
     assert preview.resolve().is_relative_to(tmp_path.resolve())
     command = (
