@@ -1006,6 +1006,7 @@ class SessionState(AgentSession):
     upstream_title: str = _DEFAULT_AGENT_TITLE
     follow_up_suggestions_enabled: bool = False
     follow_up_suggestions_task: asyncio.Task[None] | None = None
+    mcp_runtime_updates_requested: bool = False
 
     async def aclose(self) -> None:
         task = self.follow_up_suggestions_task
@@ -2958,6 +2959,7 @@ class BoxACPAgent:
         if isinstance(skillhub_search_tool, SkillHubSearchTool):
             skillhub_search_tool.reset_turn()
 
+        state.mcp_runtime_updates_requested = False
         state.turn_active = True
         meter_token = start_token_meter()
         turn_meter = get_token_meter()
@@ -3664,11 +3666,15 @@ class BoxACPAgent:
         tool_count: int = 0,
         always_load_count: int = 0,
     ) -> int:
-        """Inject a hidden, authoritative MCP state change into active turns only."""
+        """Notify active turns that have started MCP discovery, configuration or use."""
         injected = 0
         update_id = uuid4().hex
         for session_id, session in self._sessions.items():
-            if session.utility_session or not session.turn_active:
+            if (
+                session.utility_session
+                or not session.turn_active
+                or not session.mcp_runtime_updates_requested
+            ):
                 continue
             if state == "ready":
                 visibility = (
@@ -4381,10 +4387,14 @@ class BoxACPAgent:
                 return None
             return server_name, mcp_tool_name
 
-        def _record_tool_usage(tool_name: str, *, user_visible: bool) -> dict[str, Any] | None:
+        def _record_tool_usage(
+            tool_name: str, *, user_visible: bool, server_name: str | None = None,
+        ) -> dict[str, Any] | None:
+            mcp_info = _mcp_tool_info(tool_name)
+            if tool_name in {"tool_search", "mcp_config"} or server_name or mcp_info is not None:
+                state.mcp_runtime_updates_requested = True
             if not user_visible or not tool_name or tool_name == "get_skill":
                 return None
-            mcp_info = _mcp_tool_info(tool_name)
             if mcp_info is not None:
                 used_mcp_tool_counts[mcp_info] = used_mcp_tool_counts.get(mcp_info, 0) + 1
                 server_name, mcp_tool_name = mcp_info
@@ -4828,7 +4838,9 @@ class BoxACPAgent:
                                 skill_name = _get_skill_name_from_args(args)
                                 if skill_name:
                                     skill_name_by_tool_call_id[tid] = skill_name
-                            tool_usage_current = _record_tool_usage(name, user_visible=user_visible)
+                            tool_usage_current = _record_tool_usage(
+                                name, user_visible=user_visible, server_name=server_name,
+                            )
                             if tool_usage_current:
                                 await _send_turn_usage(tool_usage_current)
                             if not user_visible:
@@ -5055,6 +5067,7 @@ class BoxACPAgent:
                                 tool_usage_current = _record_tool_usage(
                                     inner.tool_name,
                                     user_visible=inner.user_visible,
+                                    server_name=inner.server_name,
                                 )
                                 if tool_usage_current:
                                     await _send_turn_usage(tool_usage_current)

@@ -57,6 +57,7 @@ from box_agent.session_log import SessionLog, SessionLogWorkspaceMismatch
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
+from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.setup import (
@@ -3495,6 +3496,7 @@ async def test_mcp_reconnect_injects_hidden_deferred_state_into_active_turns_onl
     active_state = agent._sessions[active_session.sessionId]
     inactive_state = agent._sessions[inactive_session.sessionId]
     active_state.turn_active = True
+    active_state.mcp_runtime_updates_requested = True
     runtime_tool = EchoTool()
     runtime_tool.mcp_always_load = True
 
@@ -3629,6 +3631,7 @@ async def test_acp_auth_refresh_reconnects_and_injects_deferred_catalog_update(
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
     runtime_tool = EchoTool()
     runtime_tool.mcp_always_load = False
 
@@ -3751,6 +3754,7 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
 
     await agent._finalize_mcp_load()
 
@@ -3759,6 +3763,149 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     assert "catalog discovery is complete" in update["content"]
     assert "Retry tool_search" in update["content"]
     assert "ordinary deferred schemas remain hidden" in update["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["ready", "connected", "failed", "disconnected"])
+async def test_mcp_status_during_greeting_does_not_add_model_request(tmp_path, status):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+
+    class GreetingLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            assert agent._inject_mcp_runtime_update(name="demo", state=status) == 0
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    llm = GreetingLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    # A previous turn's MCP activity must not opt the next greeting into updates.
+    state.mcp_runtime_updates_requested = True
+    for _ in range(2):
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "你好"}], field_meta={},
+        ))
+        assert response.stopReason == "end_turn"
+    assert llm.calls == 2
+    assert not any(message.source == "runtime" for message in state.agent.messages)
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_can_retry_after_readiness_update_and_call_discovered_tool(
+    tmp_path, monkeypatch,
+):
+    catalog = MCPToolCatalog()
+    catalog.mark_loading()
+    monkeypatch.setattr("box_agent.agent.get_mcp_tool_catalog", lambda: catalog)
+    echo = EchoTool()
+    echo.server_name = "demo"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=8, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_sub_agent=False,
+            mcp=MCPConfig(deferred_loading_enabled=True),
+        ),
+    )
+
+    class DiscoveryLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                assert "MCP catalog is still loading" in messages[-1].content
+                catalog.replace_server("demo", [echo])
+                catalog.mark_ready()
+                assert agent._inject_mcp_runtime_update(
+                    name="catalog", state="ready", tool_count=1,
+                ) == 1
+                yield StreamEvent(type="text", delta="Waiting for discovery")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            if self.calls in {1, 3}:
+                if self.calls == 3:
+                    assert messages[-1].source == "runtime"
+                    assert "catalog discovery is complete" in messages[-1].content
+                name, arguments = "tool_search", {"server_name": "demo"}
+            elif self.calls == 4:
+                assert '"activated_count": 1' in messages[-1].content
+                name, arguments = "echo", {"text": "discovered"}
+            else:
+                assert messages[-1].content == "tool:discovered"
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                ToolCall(id=f"call-{self.calls}", type="function", function=FunctionCall(
+                    name=name, arguments=arguments,
+                )),
+            ])
+
+    llm = DiscoveryLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    state.agent.tools["tool_search"]._readiness_timeout = 0.001
+    response = await agent.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Find and use echo"}], field_meta={},
+    ))
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 5
+    assert len(state.agent.activated_mcp_tools) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["mcp_config", "remote_echo"])
+async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_updates(
+    tmp_path, tool_name,
+):
+    class ActiveMCPTool(EchoTool):
+        @property
+        def name(self):
+            return tool_name
+
+    tool = ActiveMCPTool()
+    if tool_name == "remote_echo":
+        tool.server_name = "demo"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_sub_agent=False,
+            mcp=MCPConfig(deferred_loading_enabled=False),
+        ),
+    )
+
+    class ActiveMCPLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                    ToolCall(id="mcp-call", type="function", function=FunctionCall(
+                        name=tool_name, arguments={"text": "test"},
+                    )),
+                ])
+                return
+            if self.calls == 2:
+                assert agent._inject_mcp_runtime_update(name="demo", state="connected") == 1
+            else:
+                assert messages[-1].source == "runtime"
+                assert "Server 'demo' is connected" in messages[-1].content
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = ActiveMCPLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [tool], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    response = await agent.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Use MCP"}], field_meta={},
+    ))
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 3
 
 
 @pytest.mark.asyncio
@@ -3867,6 +4014,7 @@ async def test_mcp_reconnect_failure_injects_non_availability_state(
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
 
     async def reconnect(_name):
         return {"success": False, "error": "connection failed"}
