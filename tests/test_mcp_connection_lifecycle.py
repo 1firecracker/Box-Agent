@@ -190,7 +190,11 @@ async def test_unexpected_owner_exit_cleans_up_and_marks_connection_failed(
     conn, state = sdk_connection
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [conn])
     monkeypatch.setattr(mcp_loader, "_mcp_status", {})
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
     assert await conn.connect()
+    mcp_loader._replace_server_catalog(conn)
+    assert catalog.snapshot()
     # Simulate the SDK's background task group cancelling its owning task.
     owner = state.owners[0]
     if cancel_via == "anyio":
@@ -201,6 +205,8 @@ async def test_unexpected_owner_exit_cleans_up_and_marks_connection_failed(
     assert state.transports == 0
     assert not any(scope._active for scope in state.scopes)
     assert mcp_loader._mcp_status[conn.name].state == "failed"
+    assert not catalog.snapshot()
+    assert mcp_loader.get_all_mcp_tools() == []
     await conn.disconnect()
 
 
@@ -214,7 +220,7 @@ async def test_cleanup_failure_is_not_hidden_by_connection_registry(monkeypatch,
     async def other_close():
         closed.append("other")
 
-    conn = SimpleNamespace(name="blocked", tools=[], disconnect=fail_close)
+    conn = SimpleNamespace(name="blocked", tools=[SimpleNamespace(name="old_tool")], disconnect=fail_close)
     other = SimpleNamespace(name="other", tools=[], disconnect=other_close)
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [conn, other])
     monkeypatch.setattr(mcp_loader, "_mcp_status", {})
@@ -243,6 +249,7 @@ async def test_cleanup_failure_is_not_hidden_by_connection_registry(monkeypatch,
         assert result["error"] == "cleanup still running"
         assert conn in mcp_loader._mcp_connections
     assert mcp_loader._mcp_status["blocked"].state == "failed"
+    assert mcp_loader.get_all_mcp_tools() == []
 
 
 async def test_cancelled_global_cleanup_keeps_unfinished_connections_for_retry(monkeypatch):

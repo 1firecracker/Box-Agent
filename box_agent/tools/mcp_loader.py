@@ -1492,6 +1492,9 @@ class MCPServerConnection:
         finally:
             unexpected_stop = ready.done() and not self._close_requested.is_set()
             self._close_requested.set()
+            self.tools = []
+            if self in _mcp_connections:
+                get_mcp_tool_catalog().remove_server(self.name)
             try:
                 await self._close_owned_connection()
             except BaseException as error:  # noqa: BLE001
@@ -2020,6 +2023,7 @@ async def disconnect_mcp_server(name: str) -> dict:
         try:
             await conn.disconnect()
         except Exception as error:
+            conn.tools = []
             get_mcp_tool_catalog().remove_server(name)
             _record_status(name, "failed", error=str(error))
             return {"success": False, "error": str(error), "removedTools": removed_tools}
@@ -2537,6 +2541,7 @@ async def cleanup_mcp_connections():
                 await connection.disconnect()
             except Exception as error:
                 failed.append(connection)
+                connection.tools = []
                 _record_status(connection.name, "failed", error=str(error))
                 _warn(f"[mcp] cleanup:failed server={connection.name!r} error={error}")
             else:
@@ -2812,6 +2817,7 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
             try:
                 await old_conn.disconnect()
             except Exception as error:
+                old_conn.tools = []
                 catalog.remove_server(name)
                 _record_status(name, "failed", error=str(error), definition=definition)
                 return {"success": False, "error": str(error), "configPath": definition.source_path}
