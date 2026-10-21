@@ -489,7 +489,9 @@ def test_powershell_image_status_runs_only_after_successful_directory_switch(
     result = subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-Command", command],
         cwd=tmp_path, env={**os.environ, "BOX_AGENT_NODE": sys.executable},
-        capture_output=True, text=True, timeout=15, check=False,
+        # This checks shell semantics, not startup latency. Shared CI runners
+        # can take over 15 seconds to launch PowerShell and the child Python.
+        capture_output=True, text=True, timeout=60, check=False,
     )
 
     if directory_exists:
@@ -1389,6 +1391,7 @@ def test_legacy_output_env_is_removed_from_bash_subprocesses(monkeypatch, tmp_pa
 
 def test_posix_description_uses_injected_python_and_reserved_scratch_directory(monkeypatch):
     monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(bash_tool_module, "_resolve_login_shell", lambda: "/bin/bash")
     description = BashTool(
         runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"}
     ).description
