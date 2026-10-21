@@ -28,7 +28,7 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
     command_text = shlex.join([sys.executable, str(script)]) if python_script else "rm -rf cache"
     entered, release = threading.Event(), threading.Event()
 
-    def slow_scan(path):
+    def slow_scan(path, workspace=None):
         assert threading.current_thread() is not threading.main_thread(), "Cleanup scan blocked ACP event loop"
         entered.set()
         assert release.wait(5)
@@ -95,7 +95,7 @@ async def test_cancelled_reference_check_never_executes_pending_cleanup(tmp_path
     script.write_text("import os\nos.rmdir('cache')\n")
     command_text = shlex.join([sys.executable, str(script)]) if python_script else "rm -rf cache"
     entered, release = threading.Event(), threading.Event()
-    def slow_scan(path):
+    def slow_scan(path, workspace=None):
         entered.set()
         assert release.wait(5)
         return None

@@ -140,9 +140,51 @@ def test_publication_metadata_remains_available_to_private_fingerprint_scans(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
+@pytest.mark.parametrize("channel", ["regex", "changed", "structured"])
+async def test_unreadable_publication_record_preserves_tool_result_without_publishing(
+    tmp_path, monkeypatch, parallel_safe, channel,
+):
+    from box_agent.artifact_metadata import metadata_path, write_metadata
+
+    original = tmp_path / "past.png"
+    original.write_bytes(b"private intermediate")
+    write_metadata(original, {"type": "intermediate_asset"}, tmp_path)
+    marker = metadata_path(original, tmp_path)
+    open_path = Path.open
+
+    def unreadable(path, *args, **kwargs):
+        if path == marker:
+            raise PermissionError("unrelated publication record is unreadable")
+        return open_path(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unreadable)
+
+    class ReportTool(_EchoTool):
+        async def execute(self):
+            report = tmp_path / "report.txt"
+            report.write_bytes(b"private intermediate")
+            content = {"regex": "[report.txt]", "changed": "Saved report.txt", "structured": "done"}[channel]
+            raw = {"type": "artifact", "path": str(report)} if channel == "structured" else None
+            return ToolResult(success=True, content=content, raw_output=raw)
+
+    tool = ReportTool(parallel_safe=parallel_safe)
+    events = [event async for event in run_agent_loop(
+        llm=_OneToolCallLLM(tool.name), messages=[Message(role="user", content="Make a report")],
+        tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path),
+    )]
+    result = next(event for event in events if isinstance(event, ToolCallResult))
+    assert result.success, result.error
+    assert result.content == {"regex": "[report.txt]", "changed": "Saved report.txt", "structured": "done"}[channel]
+    assert any(isinstance(event, DoneEvent) for event in events)
+    assert not any(isinstance(event, ArtifactEvent) for event in events)
+    assert (tmp_path / "report.txt").read_bytes() == b"private intermediate"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("parallel_safe", [False, True])
 async def test_declared_delivery_scope_guards_raw_results_and_discovery(tmp_path, parallel_safe):
-    from box_agent.artifact_publication import write_metadata
+    from box_agent.artifact_publication import metadata_path, write_metadata
 
     (tmp_path / ".artifact-delivery.json").write_text('{"schema_version":1,"default":"intermediate"}')
 
@@ -165,7 +207,8 @@ async def test_declared_delivery_scope_guards_raw_results_and_discovery(tmp_path
     assert (tmp_path / "hero.png").is_file()
     # This path bypassed the diff due to its structured result; it still needs
     # durable intermediate identity when moved outside the scoped directory.
-    assert (tmp_path / ".hero.png.artifact.json").is_file()
+    assert metadata_path(tmp_path / "hero.png", tmp_path).is_file()
+    assert not (tmp_path / ".hero.png.artifact.json").exists()
 
 
 @pytest.mark.asyncio

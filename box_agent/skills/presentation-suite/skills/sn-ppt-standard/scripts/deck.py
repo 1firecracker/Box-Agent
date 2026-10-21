@@ -51,45 +51,31 @@ from font_bundle import (
 )
 
 
-def _write_delivery_record(target, content):
-    import os
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
-                                     prefix=".delivery-", suffix=".tmp", delete=False) as stream:
-        temporary = stream.name
-        stream.write(content)
-    try:
-        os.replace(temporary, target)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
 def _declare_delivery_scope(root):
     from pathlib import Path
+    import runpy
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    _write_delivery_record(root / ".artifact-delivery.json",
-        '{"schema_version":1,"default":"intermediate"}\n')
+    helper = runpy.run_path(str(Path(__file__).with_name("artifact_metadata.py")))
+    helper["write_scope"](root, {"schema_version": 1, "default": "intermediate"})
 
 
 def _publish_delivery_file(filename):
     from pathlib import Path
+    import runpy
     target = Path(filename)
     if not target.is_file():
         raise ValueError(f"Delivery file does not exist: {target}")
-    _write_delivery_record(target.with_name(f".{target.name}.artifact.json"),
-        '{"type":"artifact"}\n')
+    helper = runpy.run_path(str(Path(__file__).with_name("artifact_metadata.py")))
+    helper["write_metadata"](target, {"type": "artifact"})
 
 
 def _mark_intermediate_artifact(filename):
-    """Mark this exact QA output for Box-Agent automatic artifact discovery."""
+    """Keep this exact QA output private during automatic artifact discovery."""
     from pathlib import Path
-
-    target = Path(filename)
-    target.with_name(f".{target.name}.artifact.json").write_text(
-        '{"type":"intermediate_asset"}\n', encoding="utf-8"
-    )
+    import runpy
+    helper = runpy.run_path(str(Path(__file__).with_name("artifact_metadata.py")))
+    helper["write_metadata"](filename, {"type": "intermediate_asset"})
 
 
 def _detect_canvas(base_dir):

@@ -15,8 +15,10 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
+from ...artifact_metadata import is_metadata_record
 from ...artifact_publication import (
     STAGING_DIRECTORY, intermediate_fingerprints, is_intermediate, is_publication_sidecar,
+    is_publication_metadata,
 )
 
 _log = logging.getLogger("box_agent.core")
@@ -64,6 +66,8 @@ def _detect_artifacts(
         return []
 
     fingerprints = _publication_fingerprints(workspace_dir)
+    if fingerprints is None:
+        return []
     artifacts: list[ArtifactEvent] = []
     seen_paths: set[Path] = set()
     for match in references:
@@ -187,15 +191,24 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
                 _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                 return None
             dirnames[:] = sorted(
-                name for name in dirnames if name not in _IGNORE_DIRS
+                name for name in dirnames if (name not in _IGNORE_DIRS
+                    or include_publication_metadata and name == ".box-agent")
             )
             current = Path(current_root)
+            if current.name == ".box-agent":
+                dirnames[:] = [name for name in dirnames if name == "artifact-metadata"]
+                continue
+            if current.name == "artifact-metadata" and current.parent.name == ".box-agent":
+                dirnames[:] = [name for name in dirnames if name == "files"]
+                continue
             for filename in sorted(filenames):
                 if perf_counter() >= deadline:
                     _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                     return None
                 entry = current / filename
-                is_metadata = is_publication_sidecar(entry)
+                is_metadata = is_publication_sidecar(entry) or is_metadata_record(entry)
+                if is_publication_metadata(entry, workspace_dir) and not include_publication_metadata:
+                    continue
                 if (entry.name.startswith(".") and not (include_publication_metadata and is_metadata)) or entry.suffix == ".tmp":
                     continue
                 if not entry.is_file():
@@ -209,11 +222,18 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
     return files
 
 
-def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]]:
+def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]] | None:
+    """Return None when publication provenance cannot be read safely."""
     files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
-    return intermediate_fingerprints(
-        path for path in (files or ()) if is_publication_sidecar(path)
-    )
+    try:
+        return intermediate_fingerprints(
+            (path for path in (files or ()) if is_publication_sidecar(path) or is_metadata_record(path)), workspace_dir
+        )
+    except OSError as exc:
+        # Unknown intermediate provenance must not publish copied work files,
+        # nor prevent the successful tool result from reaching the caller.
+        _log.warning("Artifact discovery skipped for %s: cannot read publication metadata: %s", workspace_dir, exc)
+        return None
 
 
 def _snapshot_workspace_signatures(
@@ -249,6 +269,8 @@ def _detect_new_files(
 
     ws = Path(workspace_dir).resolve()
     fingerprints = _publication_fingerprints(workspace_dir)
+    if fingerprints is None:
+        return []
     artifacts: list[ArtifactEvent] = []
     for fpath in sorted(new_files):
         if fpath.name.startswith(".") or fpath.name.startswith("~") or fpath.suffix == ".tmp":
@@ -289,6 +311,8 @@ def _detect_changed_files(
 
     ws = Path(workspace_dir).resolve()
     fingerprints = _publication_fingerprints(workspace_dir)
+    if fingerprints is None:
+        return []
     artifacts: list[ArtifactEvent] = []
     for file_path in sorted(changed_files):
         try:
@@ -366,9 +390,15 @@ def _detect_regex_artifacts(
                 continue
         if raw_path:
             already.add(raw_path)
-            if raw_type == "intermediate_asset" or is_intermediate(
-                Path(raw_path), _publication_fingerprints(workspace_dir), workspace_dir
-            ):
+            if raw_type == "intermediate_asset":
+                regex_artifacts = [
+                    artifact for artifact in regex_artifacts if artifact.abs_path != raw_path
+                ]
+                return regex_artifacts, already
+            fingerprints = _publication_fingerprints(workspace_dir)
+            if fingerprints is None:
+                return [], already
+            if is_intermediate(Path(raw_path), fingerprints, workspace_dir):
                 regex_artifacts = [
                     artifact for artifact in regex_artifacts if artifact.abs_path != raw_path
                 ]

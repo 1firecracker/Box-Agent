@@ -2,6 +2,7 @@
 "use strict";
 
 const fs = require("fs");
+const { markIntermediate } = require("./artifact_delivery");
 const path = require("path");
 
 function parseArgs(argv) {
@@ -85,10 +86,7 @@ async function main() {
     }).promise;
 
     const output = path.join(args.out, `slide-${pageNumber}.png`);
-    fs.writeFileSync(
-      path.join(args.out, `.${path.basename(output)}.artifact.json`),
-      '{"type":"intermediate_asset"}\n'
-    );
+    markIntermediate(output);
     fs.writeFileSync(output, canvas.toBuffer("image/png"));
     written.push(output);
   }

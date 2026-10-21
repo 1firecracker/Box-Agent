@@ -34,7 +34,8 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "intermediate-render-artifacts", "sequential-ppt-image-inspection",
             "source-relative-pptx-page-directories", "explicit-delivery-scopes",
             "presentation-progress-without-reconfirmation", "host-playwright-runtime",
-            "bounded-image-inspection-recovery", "native-windows-rendering", "workspace-canvas-dimensions"]
+            "bounded-image-inspection-recovery", "native-windows-rendering", "workspace-canvas-dimensions",
+            "centralized-artifact-metadata"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -55,6 +56,7 @@ _delivery_scope_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "delivery_scope
 _host_playwright_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_playwright.py"))["apply"]
 _windows_compat_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "windows_compat.py"))["apply"]
 _canvas_dimensions_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "canvas_dimensions.py"))["apply"]
+_centralized_metadata_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "centralized_artifact_metadata.py"))["apply"]
 
 _image_inspection_recovery_overlay = runpy.run_path(
     str(RUNTIME_INPUT_DIR / "image_inspection_recovery.py")
@@ -373,6 +375,7 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             data = _image_inspection_recovery_overlay(str(relative), data)
             data = _windows_compat_overlay(str(relative), data)
             data = _canvas_dimensions_overlay(str(relative), data)
+            data = _centralized_metadata_overlay(str(relative), data)
             if relative.name == "SKILL.md":
                 data = _apply_host_metadata(data)
             target = staged / relative
@@ -414,6 +417,16 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
                 "source_path": runtime_relative, "source_sha256": runtime_hash,
                 "sha256": runtime_hash,
             }
+        for relative, input_path in _portable_metadata_inputs().items():
+            data = (Path(__file__).resolve().parents[1] / input_path).read_bytes()
+            target = staged / relative
+            if target.exists():
+                raise ValueError(f"Artifact metadata input needs review: upstream supplies {relative}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            digest = hashlib.sha256(data).hexdigest()
+            provenance["files"][relative] = {"input_path": input_path,
+                "source_path": relative, "source_sha256": digest, "sha256": digest}
         required = [f"skills/sn-ppt-{module}/SKILL.md" for module in MODULES]
         required += ["fonts/OFL-1.1.txt", "THIRD_PARTY_NOTICES.md",
                      "skills/sn-ppt-standard/requirements.txt"]
@@ -446,6 +459,75 @@ def _verified_input(path: Path, expected: str, message: str) -> bytes:
     return canonical
 
 
+def _portable_metadata_inputs() -> dict[str, str]:
+    return {
+        **{f"skills/sn-ppt-{module}/scripts/artifact_metadata.py": "box_agent/artifact_metadata.py"
+           for module in ("standard", "dazzle", "entry")},
+        "skills/sn-ppt-standard/scripts/artifact_delivery.js":
+            "box_agent/skills/document-skills/pptx/scripts/artifact_delivery.js",
+    }
+
+
+def refresh_portable_document_helper() -> None:
+    """Ship the shared stdlib helper with independently executable PPTX scripts."""
+    root = Path(__file__).resolve().parents[1]
+    target = root / "box_agent/skills/document-skills/pptx/scripts/artifact_metadata.py"
+    data = (root / "box_agent/artifact_metadata.py").read_bytes()
+    if not target.exists() or target.read_bytes() != data:
+        target.write_bytes(data)
+
+
+def _replace_managed_files(output_dir: Path, replacements: dict[str, bytes], provenance: dict) -> None:
+    """Stage managed writes, publish provenance last, and roll back on failure.
+
+    Keep the bundle directory itself stable so installed dependencies retain
+    their identity. Backups live on the same filesystem for atomic restoration.
+    """
+    data = {**replacements, "source.json": (
+        json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")}
+    with tempfile.TemporaryDirectory(prefix=".sn-suite-overlay-", dir=output_dir.parent) as temporary:
+        staged = Path(temporary) / "staged"
+        backups = Path(temporary) / "backups"
+        for relative, content in data.items():
+            source = output_dir / relative
+            target = staged / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            if source.exists():
+                backup = backups / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, backup)
+                target.chmod(source.stat().st_mode & 0o777)
+            else:
+                target.chmod(0o644)
+        replaced = []
+        try:
+            for relative in data:
+                target = output_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                (staged / relative).replace(target)
+                replaced.append(relative)
+        except BaseException:
+            for relative in reversed(replaced):
+                target = output_dir / relative
+                backup = backups / relative
+                if backup.exists():
+                    backup.replace(target)
+                else:
+                    target.unlink(missing_ok=True)
+            # Remove only empty directories introduced by the attempted update.
+            for relative in reversed(list(data)):
+                parent = (output_dir / relative).parent
+                while parent != output_dir:
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+            raise
+
+
 def refresh_host_overlays(output_dir: Path) -> dict:
     """Apply append-only overlays to a verified bundle without upstream access."""
     provenance = json.loads((output_dir / "source.json").read_text())
@@ -457,7 +539,8 @@ def refresh_host_overlays(output_dir: Path) -> dict:
                    "presentation-progress-without-reconfirmation": _presentation_progress_overlay,
                    "host-playwright-runtime": _host_playwright_overlay,
                    "bounded-image-inspection-recovery": _image_inspection_recovery_overlay,
-                   "workspace-canvas-dimensions": _canvas_dimensions_overlay}
+                   "workspace-canvas-dimensions": _canvas_dimensions_overlay,
+                   "centralized-artifact-metadata": _centralized_metadata_overlay}
     pending = OVERLAYS[len(applied):]
     if (provenance.get("name") != BUNDLE_NAME
             or provenance.get("revision") != PINNED_REVISION
@@ -465,7 +548,7 @@ def refresh_host_overlays(output_dir: Path) -> dict:
             or any(name not in incremental for name in pending)):
         raise ValueError("Bundle requires a full sync from the pinned upstream checkout")
     actual = {p.relative_to(output_dir).as_posix() for p in output_dir.rglob("*")
-              if p.is_file() and "__pycache__" not in p.parts}
+              if p.is_file() and not {"__pycache__", "node_modules"}.intersection(p.parts)}
     if actual != set(provenance["files"]) | {"source.json"}:
         raise ValueError("Bundle file set differs from its provenance")
     replacements = {}
@@ -478,20 +561,15 @@ def refresh_host_overlays(output_dir: Path) -> dict:
         record["sha256"] = hashlib.sha256(data).hexdigest()
     if not pending:
         return provenance
+    if "centralized-artifact-metadata" in pending:
+        for relative, input_path in _portable_metadata_inputs().items():
+            data = (Path(__file__).resolve().parents[1] / input_path).read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            replacements[relative] = data
+            provenance["files"][relative] = {"input_path": input_path,
+                "source_path": relative, "source_sha256": digest, "sha256": digest}
     provenance["overlays"] = list(OVERLAYS)
-    with tempfile.TemporaryDirectory(prefix=".sn-suite-overlay-", dir=output_dir.parent) as temporary:
-        staged = Path(temporary) / "bundle"
-        shutil.copytree(output_dir, staged, ignore=shutil.ignore_patterns("__pycache__"))
-        for relative, data in replacements.items():
-            (staged / relative).write_bytes(data)
-        (staged / "source.json").write_text(json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-        previous = Path(temporary) / "previous"
-        output_dir.rename(previous)
-        try:
-            staged.rename(output_dir)
-        except OSError:
-            previous.rename(output_dir)
-            raise
+    _replace_managed_files(output_dir, replacements, provenance)
     return provenance
 
 
@@ -501,7 +579,7 @@ def refresh_runtime_inputs(output_dir: Path) -> dict:
     if provenance.get("revision") != PINNED_REVISION or provenance.get("overlays") != OVERLAYS:
         raise ValueError("Bundle requires a full sync before refreshing runtime inputs")
     actual = {p.relative_to(output_dir).as_posix() for p in output_dir.rglob("*")
-              if p.is_file() and "__pycache__" not in p.parts}
+              if p.is_file() and not {"__pycache__", "node_modules"}.intersection(p.parts)}
     if actual != set(provenance["files"]) | {"source.json"}:
         raise ValueError("Bundle file set differs from its provenance")
     replacements = {}
@@ -509,7 +587,14 @@ def refresh_runtime_inputs(output_dir: Path) -> dict:
         _verified_input(output_dir / relative, record["sha256"],
                         f"Bundle file differs from its provenance: {relative}")
         input_path = record.get("input_path", "")
-        if input_path.startswith("scripts/presentation_suite_overlays/"):
+        if input_path in _portable_metadata_inputs().values():
+            source = Path(__file__).resolve().parents[1] / input_path
+            replacement = source.read_bytes()
+            digest = hashlib.sha256(replacement).hexdigest()
+            if digest != record["sha256"]:
+                replacements[relative] = replacement
+                record.update(sha256=digest, source_sha256=digest)
+        elif input_path.startswith("scripts/presentation_suite_overlays/"):
             source = RUNTIME_INPUT_DIR / Path(input_path).name
             if input_path != f"scripts/presentation_suite_overlays/{source.name}":
                 raise ValueError("Invalid runtime input path")
@@ -518,13 +603,8 @@ def refresh_runtime_inputs(output_dir: Path) -> dict:
             if digest != record["sha256"]:
                 replacements[relative] = replacement
                 record.update(sha256=digest, source_sha256=digest)
-    for relative, data in replacements.items():
-        (output_dir / relative).write_bytes(data)
     if replacements:
-        (output_dir / "source.json").write_text(
-            json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8", newline="\n",
-        )
+        _replace_managed_files(output_dir, replacements, provenance)
     return provenance
 
 
@@ -542,6 +622,7 @@ def main() -> int:
     result = (refresh_runtime_inputs(args.output_dir) if args.refresh_runtime_inputs
               else refresh_host_overlays(args.output_dir) if args.refresh_host_overlays
               else sync_suite(args.source_checkout, args.revision, args.output_dir))
+    refresh_portable_document_helper()
     print(f"Synced {len(result['files'])} files from {result['revision']} and pinned license inputs")
     return 0
 

@@ -154,6 +154,7 @@ async def test_incomplete_reference_scan_rejects_cleanup_without_deleting_files(
     assert not result.success
     assert "CHAT_REFERENCE_PROTECTED" in result.error
     assert result.permission_request is None
+    monkeypatch.undo()  # pathlib.iterdir also uses os.scandir on Python 3.14.
     assert len(list(folder.iterdir())) == 6
 
 

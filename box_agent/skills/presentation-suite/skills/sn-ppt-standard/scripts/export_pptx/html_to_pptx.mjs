@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import artifactDelivery from '../artifact_delivery.js';
 // HTML → PPTX 转换器 CLI
 // 用法: node html_to_pptx.mjs --deck-dir <path> [--output <filename>] [--force]
 
@@ -162,7 +163,7 @@ async function main() {
 
   // 成功输出（stdout）
   const sizeKB = (fileSize / 1024).toFixed(1);
-  if (result.failCount === 0) writeFileSync(resolve(dirname(outputPath), `.${basename(outputPath)}.artifact.json`), '{"type":"artifact"}\n');
+  if (result.failCount === 0) artifactDelivery.publishArtifact(outputPath);
   console.log(JSON.stringify({
     success: result.failCount === 0,
     output: outputPath,

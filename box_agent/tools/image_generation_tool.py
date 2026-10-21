@@ -672,7 +672,7 @@ class GenerateImageTool(Tool):
                     "type": "artifact" if publish_artifact else "intermediate_asset",
                     "size_bytes": len(image_bytes),
                     "sha256": hashlib.sha256(image_bytes).hexdigest(),
-                })
+                }, self.workspace_dir)
                 before = before_write(target)
                 target.write_bytes(image_bytes)
 

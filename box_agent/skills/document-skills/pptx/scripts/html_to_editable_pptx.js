@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require("fs");
+const { markIntermediate } = require("./artifact_delivery");
 const Module = require("module");
 const os = require("os");
 const path = require("path");
@@ -394,10 +395,7 @@ async function main() {
   for (let i = 0; i < slideHandles.length; i += 1) {
     const imagePath = path.join(outDir, `slide-${String(i + 1).padStart(2, "0")}.png`);
     // Source previews are QA inputs, not standalone user deliverables.
-    fs.writeFileSync(
-      path.join(outDir, `.${path.basename(imagePath)}.artifact.json`),
-      '{"type":"intermediate_asset"}\n'
-    );
+    markIntermediate(imagePath);
     await slideHandles[i].screenshot({ path: imagePath });
     previews.push(imagePath);
   }

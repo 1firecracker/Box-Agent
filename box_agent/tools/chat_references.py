@@ -22,8 +22,9 @@ from urllib.parse import unquote, urlsplit
 import zipfile
 from xml.etree import ElementTree
 
+from ..artifact_metadata import read_metadata as read_file_metadata, legacy_metadata_path, remove_metadata
 from ..artifact_publication import (
-    metadata_path, read_metadata, retain_chat_file, retained_chat_file_in,
+    retain_chat_file, retained_chat_file_in,
     retained_chat_files_in, ChatReferenceScanError, is_publication_metadata,
 )
 from .base import ToolResult
@@ -117,7 +118,7 @@ def local_dependencies(path: Path, root: Path) -> set[Path]:
                     for node in ElementTree.fromstring(archive.read(info)).iter():
                         if node.attrib.get("TargetMode") == "External" and node.attrib.get("Target"):
                             links.append(node.attrib["Target"])
-    explicit = read_metadata(metadata_path(path)).get("dependencies", [])
+    explicit = read_file_metadata(path, root).get("dependencies", [])
     if isinstance(explicit, list):
         links.extend(link for link in explicit if isinstance(link, str))
     return {candidate for link in links if (candidate := _local_path(link, base, root)) is not None}
@@ -356,7 +357,7 @@ class ChatReferences:
         # Rebuild missing caches from durable facts, including after compaction.
         for path in self.paths:
             if path.exists():
-                retain_chat_file(path)
+                retain_chat_file(path, self.root)
 
     def retain_text(self, content) -> None:
         for path in self._references_in_text(content):
@@ -377,8 +378,8 @@ class ChatReferences:
         pending, closure = [path], set()
         while pending:
             candidate = pending.pop()
-            if (candidate in closure or is_publication_metadata(candidate)
-                    or is_publication_metadata(candidate.resolve())):
+            if (candidate in closure or is_publication_metadata(candidate, self.root)
+                    or is_publication_metadata(candidate.resolve(), self.root)):
                 continue
             closure.add(candidate)
             closure.add(candidate.resolve())
@@ -400,7 +401,7 @@ class ChatReferences:
             self.paths.update(closure)
         for candidate in closure:
             if candidate.exists():
-                retain_chat_file(candidate)
+                retain_chat_file(candidate, self.root)
 
     def affected(self, path: Path) -> set[Path]:
         lexical = Path(os.path.abspath(path))
@@ -416,7 +417,7 @@ class ChatReferences:
                         result.add(ref)
         if not path.name:
             return result
-        result.update(retained_chat_files_in(path))
+        result.update(retained_chat_files_in(path, self.root))
         return result
 
     def _user_request(self) -> str:
@@ -477,7 +478,7 @@ class ChatReferences:
             changes = dict.fromkeys(changes)
             for change in changes:
                 refs = self.paths.copy() if change.operation == "unresolved" else self.affected(change.path)
-                if not refs and (retained := retained_chat_file_in(change.path)):
+                if not refs and (retained := retained_chat_file_in(change.path, self.root)):
                     refs.add(retained)
                 if refs:
                     impacted.append((change, refs))
@@ -540,7 +541,9 @@ class ChatReferences:
             # The release is durable before removing its derived cache. Do not
             # leave an orphan marker that would protect a future unrelated file.
             for path in gone:
-                metadata_path(path).unlink(missing_ok=True)
+                remove_metadata(path, self.root)
+                # Release existing legacy caches only after durable deletion.
+                legacy_metadata_path(path).unlink(missing_ok=True)
 
     def denied(self, request: dict) -> None:
         data = request.get("chat_reference_delete", {})
@@ -564,14 +567,14 @@ def current_chat_policy() -> tuple[list[str], list[str]]:
     return (sorted(map(str, current[0].paths)), sorted(map(str, current[1]))) if current else ([], [])
 
 
-def chat_mutation_error(path: Path, operation="write") -> ToolResult | None:
+def chat_mutation_error(path: Path, operation="write", workspace: str | Path | None = None) -> ToolResult | None:
     if operation == "write":
         return None
     path = path.resolve()
     current = _CURRENT.get()
     try:
         protected = current[0].affected(path) if current else set()
-        retained = None if protected else retained_chat_file_in(path)
+        retained = None if protected else retained_chat_file_in(path, current[0].root if current else workspace)
     except ChatReferenceScanError as exc:
         return ToolResult(success=False, error=str(exc))
     if not protected and retained is None:
@@ -581,12 +584,12 @@ def chat_mutation_error(path: Path, operation="write") -> ToolResult | None:
     return ToolResult(success=False, error=f"CHAT_REFERENCE_PROTECTED: keep {path} available to chat; do not {operation} it as cleanup. Normal edits and appends are allowed.")
 
 
-def bash_chat_mutation_error(command: str, workspace: Path, *, python_runtime=True) -> ToolResult | None:
+def bash_chat_mutation_error(command: str, workspace: Path, *, python_runtime=True, retention_workspace: str | Path | None = None) -> ToolResult | None:
     from .python_mutation_guard import python_guard_error
 
     if error := python_guard_error(command):
         return ToolResult(success=False, error=error)
     for mutation in dict.fromkeys(mutations("bash", {"command": command}, workspace, python_runtime=python_runtime)):
-        if denied := chat_mutation_error(mutation.path, mutation.operation):
+        if denied := chat_mutation_error(mutation.path, mutation.operation, retention_workspace or workspace):
             return denied
     return None

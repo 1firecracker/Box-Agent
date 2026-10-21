@@ -1,6 +1,8 @@
 """Real kernels share Bash's child command checks without rejecting probes."""
 
 import asyncio
+import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -80,6 +82,50 @@ async def test_child_edits_atomic_replace_and_temporary_cleanup_remain_allowed(k
     assert result.success, result.error
     assert "allowed" in result.content
     assert target.read_text() == "updated"
+
+
+@pytest.mark.asyncio
+async def test_kernel_producer_registers_outputs_with_existing_chat_references(kernel):
+    from box_agent.artifact_metadata import read_metadata, read_scope
+
+    target, run = kernel
+    helper = Path(__file__).resolve().parents[1] / "box_agent/skills/document-skills/pptx/scripts/artifact_metadata.py"
+    result = await run(
+        "import runpy\nfrom pathlib import Path\n"
+        f"metadata = runpy.run_path({str(helper)!r})\n"
+        "Path('new-deck').mkdir()\n"
+        "metadata['write_scope']('new-deck', {'schema_version': 1, 'default': 'intermediate'})\n"
+        "Path('new-deck/new.png').write_bytes(b'preview')\n"
+        "metadata['write_metadata']('new-deck/new.png', {'type': 'intermediate_asset'})"
+    )
+    assert result.success, result.error
+    output = target.parent / "new-deck/new.png"
+    assert read_metadata(output, target.parent)["type"] == "intermediate_asset"
+    assert read_scope(output.parent, target.parent) == {"schema_version": 1, "default": "intermediate"}
+    assert not (output.parent / ".new.png.artifact.json").exists()
+    assert not (output.parent / ".artifact-delivery.json").exists()
+    assert target.read_text() == "published"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.unlink not in os.supports_dir_fd or os.rename not in os.supports_dir_fd,
+                    reason="descriptor-relative mutations unavailable")
+@pytest.mark.parametrize("operation", [
+    "os.unlink('published.txt', dir_fd=directory)",
+    "os.rename('published.txt', 'moved.txt', src_dir_fd=directory, dst_dir_fd=directory)",
+])
+async def test_kernel_descriptor_relative_mutations_preserve_chat_references(kernel, operation):
+    target, run = kernel
+    result = await run(
+        "import os\nfrom pathlib import Path\n"
+        "directory = os.open('.', os.O_RDONLY)\n"
+        "Path('nested').mkdir()\nos.chdir('nested')\n"
+        f"try:\n    {operation}\nfinally:\n    os.close(directory)"
+    )
+    assert not result.success
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert target.read_text() == "published"
+    assert not (target.parent / "moved.txt").exists()
 
 
 @pytest.mark.asyncio

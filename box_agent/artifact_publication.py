@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
-import tempfile
 from typing import Iterable, Iterator
 from time import monotonic
+
+from . import artifact_metadata as storage
 
 SUFFIX = ".artifact.json"
 SCOPE_FILE = ".artifact-delivery.json"
@@ -28,9 +28,20 @@ def is_publication_sidecar(path: Path) -> bool:
     return name.startswith(".") and name.endswith(SUFFIX) and len(name) > len(SUFFIX) + 1
 
 
-def is_publication_metadata(path: Path) -> bool:
+def is_publication_metadata(path: Path, workspace: str | Path | None = None) -> bool:
     """Reserved publication records are protocol data, never deliverables."""
-    return path.name == SCOPE_FILE or is_publication_sidecar(path)
+    if path.name == SCOPE_FILE or is_publication_sidecar(path):
+        return True
+    if workspace:
+        try:
+            relative = path.absolute().relative_to(Path(workspace).absolute())
+            if relative.parts and relative.parts[0] == ".box-agent":
+                return True
+        except ValueError:
+            pass
+    return (any(path.parts[index:index + 2] == (".box-agent", "artifact-metadata")
+                for index in range(len(path.parts) - 1))
+            or path.absolute().is_relative_to(storage.retention_directory()))
 
 
 def is_staging_file(path: Path, workspace: str | Path) -> bool:
@@ -42,18 +53,18 @@ def is_staging_file(path: Path, workspace: str | Path) -> bool:
         return False
 
 
-def metadata_path(path: Path) -> Path:
-    return path.with_name(f".{path.name}{SUFFIX}")
+def metadata_path(path: Path, workspace: str | Path | None = None) -> Path:
+    return storage.metadata_path(path, workspace)
 
 
 def read_metadata(path: Path) -> dict:
-    try:
-        if path.stat().st_size > 4096:
-            return {}
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    """Compatibility reader for legacy markers and centralized records."""
+    if is_publication_sidecar(path):
+        return storage.read_metadata(path.with_name(path.name[1:-len(SUFFIX)]))
+    if path.name == SCOPE_FILE:
+        return storage.read_scope(path.parent)
+    record = storage.read_record(path)
+    return record[1] if record else {}
 
 
 def content_fingerprint(path: Path) -> tuple[int, str] | None:
@@ -76,73 +87,91 @@ def content_fingerprint(path: Path) -> tuple[int, str] | None:
         return None
 
 
-def write_metadata(path: Path, value: dict) -> None:
-    """Atomic sidecar writes also work for concurrent independent producers."""
-    target = metadata_path(path)
-    if read_metadata(target).get("retain_for_chat") is True:
-        value = {**value, "retain_for_chat": True}
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
-                                     prefix=".artifact-", suffix=".tmp", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            json.dump(value, stream, ensure_ascii=False)
-            stream.write("\n")
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+def write_metadata(path: Path, value: dict, workspace: str | Path | None = None) -> None:
+    storage.write_metadata(path, value, workspace)
 
 
-def retain_chat_file(path: Path) -> None:
+def retain_chat_file(path: Path, workspace: str | Path | None = None) -> None:
     """Cache retention without promoting a file's delivery placement."""
-    if is_publication_metadata(path):
+    if is_publication_metadata(path, workspace):
         return
-    value = read_metadata(metadata_path(path))
-    if value.get("retain_for_chat") is not True:
-        write_metadata(path, {**value, "retain_for_chat": True})
+    value = storage.read_metadata(path, workspace)
+    if (value.get("retain_for_chat") is not True
+            or not storage.metadata_path(path, workspace).exists()):
+        write_metadata(path, {**value, "retain_for_chat": True}, workspace)
+    storage.write_retention(path, workspace)
 
 
-def retained_chat_files_in(path: Path) -> Iterator[Path]:
-    """Read retention markers with a bounded, non-symlink-following walk."""
+def retained_chat_files_in(path: Path, workspace: str | Path | None = None) -> Iterator[Path]:
+    """Check legacy and central caches with bounded, non-following scans."""
     if not path.name:
         return
-    marker = path if path.name.startswith(".") and path.name.endswith(SUFFIX) else metadata_path(path)
-    if read_metadata(marker).get("retain_for_chat") is True:
-        yield path
-    for parent in path.parents:
-        if parent.name and read_metadata(metadata_path(parent)).get("retain_for_chat") is True:
-            yield parent
-    if path.is_dir() and not path.is_symlink():
-        deadline = monotonic() + _REFERENCE_SCAN_TIMEOUT_SECONDS
-        pending, count = [path], 0
-        try:
+    deadline = monotonic() + _REFERENCE_SCAN_TIMEOUT_SECONDS
+    count = 0
+
+    def checked():
+        nonlocal count
+        count += 1
+        if count > _REFERENCE_SCAN_MAX_ENTRIES or monotonic() >= deadline:
+            raise ChatReferenceScanError(
+                f"CHAT_REFERENCE_PROTECTED: retention scan incomplete for {path}; preserve it or use a narrower cleanup target"
+            )
+
+    try:
+        original = path.with_name(path.name[1:-len(SUFFIX)]) if is_publication_sidecar(path) else path
+        for candidate in (original, *original.parents):
+            if not candidate.name:
+                continue
+            if storage.read_metadata(candidate, workspace).get("retain_for_chat") is True:
+                yield candidate
+            for marker in storage.iter_retention_records(candidate):
+                checked()
+                record = storage.read_retention_record(marker)
+                if record and record[0] == candidate.resolve():
+                    yield record[0]
+        if storage.is_metadata_record(path):
+            record = storage.read_record(path)
+            if record and record[1].get("retain_for_chat") is True:
+                yield record[0]
+        if record := storage.read_retention_record(path):
+            yield record[0]
+        if path.is_dir() and not path.is_symlink():
+            # Publication history is unrelated to retention. Only the shared
+            # reference cache and the affected subtree need enumeration.
+            for marker in storage.iter_retention_records():
+                checked()
+                record = storage.read_retention_record(marker)
+                if record and (record[0].is_relative_to(original.resolve())
+                               or marker.is_relative_to(path)):
+                    yield record[0]
+            pending = [path]
             while pending:
                 with os.scandir(pending.pop()) as entries:
                     for entry in entries:
-                        count += 1
-                        if count > _REFERENCE_SCAN_MAX_ENTRIES or monotonic() >= deadline:
-                            raise ChatReferenceScanError(
-                                f"CHAT_REFERENCE_PROTECTED: retention scan incomplete for {path}; preserve it or use a narrower cleanup target"
-                            )
+                        checked()
                         if entry.is_dir(follow_symlinks=False):
                             pending.append(Path(entry.path))
-                        elif entry.name.startswith(".") and entry.name.endswith(SUFFIX):
-                            marker = Path(entry.path)
-                            if read_metadata(marker).get("retain_for_chat") is True:
-                                yield marker.with_name(marker.name[1:-len(SUFFIX)])
-        except OSError as exc:
-            raise ChatReferenceScanError(f"CHAT_REFERENCE_PROTECTED: cannot check retention for {path}; preserve it") from exc
+                        elif is_publication_sidecar(Path(entry.path)):
+                            if read_metadata(Path(entry.path)).get("retain_for_chat") is True:
+                                yield Path(entry.path).with_name(entry.name[1:-len(SUFFIX)])
+                        elif storage.is_metadata_record(Path(entry.path)):
+                            record = storage.read_record(Path(entry.path))
+                            if record and record[1].get("retain_for_chat") is True:
+                                yield record[0]
+                        elif entry.is_symlink() and entry.name in {".box-agent", "artifact-metadata", "files"}:
+                            raise OSError("redirected retention storage")
+    except (OSError, RuntimeError) as exc:
+        if isinstance(exc, ChatReferenceScanError):
+            raise
+        raise ChatReferenceScanError(f"CHAT_REFERENCE_PROTECTED: cannot check retention for {path}; preserve it") from exc
 
 
-def retained_chat_file_in(path: Path) -> Path | None:
+def retained_chat_file_in(path: Path, workspace: str | Path | None = None) -> Path | None:
     """Find the first retained file, rejecting incomplete directory scans."""
-    return next(retained_chat_files_in(path), None)
+    return next(retained_chat_files_in(path, workspace), None)
 
 
-def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[str]]:
+def intermediate_fingerprints(metadata_files: Iterable[Path], workspace: str | Path | None = None) -> dict[int, set[str]]:
     """Build a discovery-local index from sidecars, never process-global state.
 
     Enrich older producer markers while the original file is still available.
@@ -156,13 +185,14 @@ def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[s
         size, digest = value.get("size_bytes"), value.get("sha256")
         if not (isinstance(size, int) and 0 <= size <= MAX_HASH_BYTES
                 and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
-            original = marker.with_name(marker.name[1:-len(SUFFIX)])
+            record = storage.read_record(marker) if not is_publication_sidecar(marker) else None
+            original = record[0] if record else marker.with_name(marker.name[1:-len(SUFFIX)])
             fingerprint = content_fingerprint(original)
             if fingerprint is None:
                 continue
             size, digest = fingerprint
             try:
-                write_metadata(original, {**value, "size_bytes": size, "sha256": digest})
+                write_metadata(original, {**value, "size_bytes": size, "sha256": digest}, workspace)
             except OSError:
                 pass
         result.setdefault(size, set()).add(digest)
@@ -170,11 +200,11 @@ def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[s
 
 
 def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: str | None = None) -> bool:
-    if is_publication_metadata(path):
+    if is_publication_metadata(path, workspace):
         return True
     if workspace and is_staging_file(path, workspace):
         return True
-    value = read_metadata(metadata_path(path))
+    value = storage.read_metadata(path, workspace)
     if value.get("type") == "intermediate_asset":
         return True
     if value.get("type") == "artifact":
@@ -186,7 +216,7 @@ def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: st
             if fingerprint:
                 metadata.update(size_bytes=fingerprint[0], sha256=fingerprint[1])
             try:
-                write_metadata(path, metadata)
+                write_metadata(path, metadata, workspace)
             except OSError:
                 pass
             return True
@@ -200,7 +230,7 @@ def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: st
         return False
     size, digest = fingerprint
     try:
-        write_metadata(path, {"type": "intermediate_asset", "size_bytes": size, "sha256": digest})
+        write_metadata(path, {"type": "intermediate_asset", "size_bytes": size, "sha256": digest}, workspace)
     except OSError:
         pass
     return True
@@ -215,7 +245,7 @@ def delivery_scope(path: Path, workspace: str | Path) -> Path | None:
         if target == root:
             return None
         for parent in target.parents:
-            declaration = read_metadata(parent / SCOPE_FILE)
+            declaration = storage.read_scope(parent, root)
             if declaration.get("schema_version") == 1 and declaration.get("default") == "intermediate":
                 return parent
             if parent == root:
@@ -228,7 +258,7 @@ def delivery_scope(path: Path, workspace: str | Path) -> Path | None:
 def is_unpublished_scoped_file(path: Path, workspace: str | Path) -> bool:
     if delivery_scope(path, workspace) is None:
         return False
-    return read_metadata(metadata_path(path)).get("type") != "artifact"
+    return storage.read_metadata(path, workspace).get("type") != "artifact"
 
 
 def apply_delivery_policy(raw_output: dict | None, workspace: str | None) -> dict | None:
@@ -241,7 +271,7 @@ def apply_delivery_policy(raw_output: dict | None, workspace: str | None) -> dic
     path = Path(value)
     if not path.is_absolute():
         path = Path(workspace) / path
-    if is_publication_metadata(path) or is_staging_file(path, workspace):
+    if is_publication_metadata(path, workspace) or is_staging_file(path, workspace):
         return {**raw_output, "type": "intermediate_asset"}
     if is_unpublished_scoped_file(path, workspace):
         if path.is_file():
