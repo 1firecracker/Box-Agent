@@ -7,6 +7,7 @@ from box_agent.acp import BoxACPAgent
 from box_agent.acp.project_context import build_project_startup_context_prompt as acp_project_prompt
 from box_agent.project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT,
+    _git_startup_section,
     append_prompt_segment,
     build_project_startup_context_prompt,
     compose_prompt_segments,
@@ -168,7 +169,7 @@ def test_git_status_timeout_is_reported_unknown_not_clean(monkeypatch, tmp_path)
         "status": subprocess.TimeoutExpired(["git", "status"], 1.5),
     })
 
-    prompt = build_project_startup_context_prompt(tmp_path)
+    prompt = _git_startup_section(tmp_path)
 
     assert "- Git repository: yes" in prompt
     assert "- Status: unknown" in prompt
@@ -182,7 +183,7 @@ def test_git_status_failure_is_reported_unknown_not_clean(monkeypatch, tmp_path)
         "status": (128, ""),
     })
 
-    prompt = build_project_startup_context_prompt(tmp_path)
+    prompt = _git_startup_section(tmp_path)
 
     assert "- Status: unknown" in prompt
     assert "Status: clean" not in prompt
@@ -195,7 +196,7 @@ def test_git_rev_parse_timeout_is_not_reported_as_non_repository(monkeypatch, tm
         "rev-parse": subprocess.TimeoutExpired(["git", "rev-parse"], 1.5),
     })
 
-    prompt = build_project_startup_context_prompt(tmp_path)
+    prompt = _git_startup_section(tmp_path)
 
     assert "- Git repository: unknown" in prompt
     assert "no or unavailable" not in prompt
@@ -204,7 +205,7 @@ def test_git_rev_parse_timeout_is_not_reported_as_non_repository(monkeypatch, tm
 def test_git_answers_keep_existing_wording(monkeypatch, tmp_path) -> None:
     _fake_git(monkeypatch, {"rev-parse": (128, "")})
     assert "- Git repository: no or unavailable from this workspace." in (
-        build_project_startup_context_prompt(tmp_path)
+        _git_startup_section(tmp_path)
     )
 
     _fake_git(monkeypatch, {
@@ -212,7 +213,7 @@ def test_git_answers_keep_existing_wording(monkeypatch, tmp_path) -> None:
         "branch": (0, "main"),
         "status": (0, ""),
     })
-    assert "- Status: clean" in build_project_startup_context_prompt(tmp_path)
+    assert "- Status: clean" in _git_startup_section(tmp_path)
 
 
 def test_acp_run_git_keeps_none_on_timeout_contract(monkeypatch, tmp_path) -> None:

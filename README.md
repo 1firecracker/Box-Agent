@@ -349,6 +349,13 @@ box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
 box-agent install-node      # install managed Node.js runtime for skills (macOS)
 ```
 
+### Code-mode startup context
+
+Code-mode sessions load the workspace-root `AGENTS.md` into the startup prompt.
+They do not run Git commands during prompt assembly; the prompt states that Git
+state has not been checked. The agent can inspect Git through tools when needed
+and must still protect existing user changes.
+
 ### Agent Trace diagnostics
 
 Run `box-agent trace-viewer` to open the packaged, offline developer viewer. Open `~/.box-agent/log/sessions/` for a newest-first overview of every trace, then select one run to inspect per-turn metrics, LLM/tool waterfalls, raw events, and the complete system → user → assistant/tool → final-response chain. You can still open one `.jsonl` file directly.
