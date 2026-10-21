@@ -73,5 +73,28 @@ async def test_execute_code_blocks_parent_writes_and_allows_cwd_writes(
         assert (session_root / "research" / "result.txt").read_text(
             encoding="utf-8"
         ) == "source"
+
+        if sys.platform in {"darwin", "linux"}:
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep", encoding="utf-8")
+            for operation in (
+                "os.unlink('keep.txt', dir_fd=directory)",
+                "os.mkdir('created', dir_fd=directory)",
+                "os.replace('research/result.txt', 'replacement.txt', dst_dir_fd=directory)",
+            ):
+                denied = await tool.execute(
+                    code=(
+                        f"import os\ndirectory = os.open({str(outside)!r}, os.O_RDONLY)\n"
+                        f"try:\n    {operation}\nfinally:\n    os.close(directory)"
+                    ),
+                    session_id=session_id,
+                )
+                assert not denied.success
+                assert "EXECUTE_CODE_WRITE_OUTSIDE_WORKSPACE" in denied.error
+            assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+            assert not (outside / "created").exists()
+            assert not (outside / "replacement.txt").exists()
+            assert (session_root / "research/result.txt").read_text(encoding="utf-8") == "source"
     finally:
         await JupyterSandboxTool.shutdown_all()

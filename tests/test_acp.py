@@ -5526,7 +5526,7 @@ async def test_acp_ignores_host_artifact_root_dir(tmp_path, monkeypatch, capsys)
     assert state.upstream_session_id == "office-session-a"
     assert not (tmp_path / "output").exists()
     assert sandbox_tool._get_workspace("ignored") == workspace.resolve()
-    assert "BOX_AGENT_WORKSPACE_DIR" not in bash_tool._subprocess_env
+    assert bash_tool._subprocess_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())
     assert "BOX_AGENT_OUTPUT_DIR" not in bash_tool._subprocess_env
     assert attachment.is_file()
     assert not (Path(bash_tool.workspace_dir).parent / attachment.name).exists()
@@ -7771,7 +7771,7 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
     assert scratch_dir.parent == workspace / ".box-agent-scratch"
     assert bash_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
     assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
-    assert "BOX_AGENT_WORKSPACE_DIR" not in bash_env
+    assert bash_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())
     assert "BOX_AGENT_WORKSPACE_DIR" not in execute_code_env
     assert bash_env["NODE_PATH"].split(os.pathsep)[-1] == str(node_modules)
     assert bash_env["NPM_CONFIG_PREFIX"] == str(

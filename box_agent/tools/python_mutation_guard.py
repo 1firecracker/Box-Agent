@@ -146,6 +146,7 @@ class PythonMutationGuard:
 
     def __init__(self, environment: dict[str, str] | None) -> None:
         context = copy_context()
+        workspace = (environment if environment is not None else os.environ).get("BOX_AGENT_WORKSPACE_DIR")
         token = secrets.token_hex(32)
 
         class Handler(socketserver.StreamRequestHandler):
@@ -167,9 +168,9 @@ class PythonMutationGuard:
             if request["kind"] == "mutation":
                 if request["operation"] not in {"delete", "move"}:
                     raise ValueError("invalid operation")
-                result = chat_mutation_error(Path(request["path"]), request["operation"])
+                result = chat_mutation_error(Path(request["path"]), request["operation"], workspace)
             elif request["kind"] == "command":
-                result = bash_chat_mutation_error(request["command"], Path(request["cwd"]), python_runtime=True)
+                result = bash_chat_mutation_error(request["command"], Path(request["cwd"]), python_runtime=True, retention_workspace=workspace)
             else:
                 raise ValueError("invalid request")
             return result.error if result else None
@@ -201,12 +202,15 @@ class PythonMutationGuard:
     def kernel_setup_code(self) -> str:
         """Share command checks and guarded child startup with a Jupyter kernel."""
         environment = {key: self.environment[key] for key in (_ENDPOINT, "PYTHONPATH")}
+        workspace_environment = {key: self.environment[key] for key in ("BOX_AGENT_WORKSPACE_DIR",) if key in self.environment}
+        environment.update(workspace_environment)
         namespace = {"_endpoint": json.loads(environment[_ENDPOINT]),
                      "_guard_directory": self._directory.name}
         return f"""
 _box_guard_sys._box_agent_command_guard = {namespace!r}
 exec({_CLIENT_CODE!r}, _box_guard_sys._box_agent_command_guard)
 _box_guard_sys._box_agent_command_env = {{key: _box_guard_os.environ.get(key) for key in {list(environment)!r}}}
+_box_guard_os.environ.update({workspace_environment!r})
 _box_guard_os.environ[{_ENDPOINT!r}] = {environment[_ENDPOINT]!r}
 _box_guard_os.environ["PYTHONPATH"] = {self._directory.name!r} + (_box_guard_os.pathsep + _box_guard_sys._box_agent_command_env["PYTHONPATH"] if _box_guard_sys._box_agent_command_env["PYTHONPATH"] else "")
 """

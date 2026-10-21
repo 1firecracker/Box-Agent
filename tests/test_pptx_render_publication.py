@@ -77,6 +77,7 @@ def test_pdfjs_script_marks_each_page_even_if_a_later_page_fails(tmp_path, fails
         pytest.skip("Node is required for the pdf.js script check")
     script = tmp_path / "pdfjs_render.js"
     shutil.copyfile(SCRIPTS / script.name, script)
+    shutil.copyfile(SCRIPTS / "artifact_delivery.js", tmp_path / "artifact_delivery.js")
     # Only the rendering dependencies are faked; run the shipped entry point unchanged.
     pdfjs = tmp_path / "node_modules/pdfjs-dist/legacy/build/pdf.mjs"
     pdfjs.parent.mkdir(parents=True)

@@ -44,9 +44,10 @@ def run_image_renderer(
             stat = image.stat()
             if before.get(image) == (stat.st_size, stat.st_mtime_ns):
                 continue
-            image.with_name(f".{image.name}.artifact.json").write_text(
-                '{"type":"intermediate_asset"}\n', encoding="utf-8"
-            )
+            # Load the bundled stdlib helper without requiring box_agent on sys.path.
+            import runpy
+            write_metadata = runpy.run_path(str(Path(__file__).with_name("artifact_metadata.py")))["write_metadata"]
+            write_metadata(image, {"type": "intermediate_asset"})
 
 
 def find_binary(candidates: list[str]) -> str | None:

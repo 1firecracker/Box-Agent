@@ -1005,7 +1005,7 @@ class BashTool(Tool):
         self._approved_safety_commands: set[str] = set()
         self._subprocess_env = None
         self._use_login_shell = True
-        if sandbox_venv_path or runtime_env:
+        if sandbox_venv_path or runtime_env or workspace_dir:
             self._subprocess_env = os.environ.copy()
         if sandbox_venv_path:
             self._subprocess_env["VIRTUAL_ENV"] = sandbox_venv_path
@@ -1020,6 +1020,8 @@ class BashTool(Tool):
                     if key.lower() in {"npm_config_prefix", "npm_config_cache"}:
                         self._subprocess_env.pop(key, None)
             self._subprocess_env.update(runtime_env)
+        if workspace_dir:
+            self._subprocess_env["BOX_AGENT_WORKSPACE_DIR"] = str(Path(workspace_dir).resolve())
         if self._subprocess_env is None and "BOX_AGENT_OUTPUT_DIR" in os.environ:
             self._subprocess_env = os.environ.copy()
         if self._subprocess_env is not None:

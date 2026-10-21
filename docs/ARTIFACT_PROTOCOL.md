@@ -18,7 +18,7 @@ discriminator. Markdown links inside `agent_message_chunk` text are decoration
 only—do not parse them as the source of truth for files.
 
 Workspace changes alone never establish task ownership: concurrent tasks may
-share the same cwd. A publication sidecar describes a file's delivery placement,
+share the same cwd. A publication record describes a file's delivery placement,
 not which task produced it. Changed-file discovery requires both complete
 pre/post snapshots and an exact absolute or workspace-relative path in the
 current tool result. A directory or a nested file's basename is insufficient.
@@ -38,22 +38,69 @@ unmarked file as a primary deliverable: producer metadata still determines
 `primary` / `supporting` placement and suppresses intermediate files. Unchanged
 append/edit operations and failed writes do not announce a new revision.
 
+### Internal metadata storage
+
+New publication, intermediate-asset, delivery-scope and chat-retention records
+live under the workspace's `.box-agent/artifact-metadata/` directory. File and
+directory-scope records use separate `files/` and `scopes/` directories. Each
+record is keyed by the SHA-256 of its canonical absolute path (UTF-8), and stores
+`{"path":"/absolute/path","metadata":{...}}`. Writes replace independent records
+atomically; they do not create adjacent `.filename.artifact.json` files or
+`.artifact-delivery.json` declarations in business directories.
+
+Runtime callers provide their workspace explicitly. Producer subprocesses inherit
+`BOX_AGENT_WORKSPACE_DIR`, so changing a script's cwd does not change the metadata
+root. Standalone producers infer an enclosing workspace or use their output
+directory when no workspace is available. Internal storage must not redirect
+through symlinks. In a Git workspace, the internal `.box-agent` directory is
+excluded locally without editing the user's `.gitignore`.
+
+Chat-reference protection also has a shared derived cache under
+`<BOX_AGENT_HOME>/artifact-metadata/retained/` (default
+`~/.box-agent/artifact-metadata/retained/`). It lets another workspace discover
+references to shared external attachments and dependencies without writing in
+the attachment directory. Each canonical target path has its own SHA-256
+directory, containing independent workspace-keyed records
+`{"path":"/absolute/path","workspace":"/absolute/workspace"}`. Runtime retention
+registers these records after the Session Log reference event; producers only
+update workspace publication metadata. The cache does not establish new session
+facts and is rebuilt from Session Log on restoration. Confirmed deletion releases
+the target's registered workspace caches and shared owner records after the
+durable release event, leaving unrelated targets intact.
+
+Single-file mutation checks use exact path and ancestor lookups. Directory checks
+scan only retained references and the affected subtree, with the existing limits;
+they do not enumerate unrelated publication/intermediate history. Internal-path
+classification is relative to the workspace: a workspace itself beneath the
+user's `.box-agent` profile still contains ordinary deliverables.
+
+Legacy adjacent sidecars and `.artifact-delivery.json` scopes remain readable.
+Existing markers are not rewritten or deleted; later metadata updates use the
+internal store. This storage change
+does not change artifact event fields, delivery placement or host card behavior.
+
 ### Intermediate files produced by scripts
 
 Producers can keep an output available on disk without automatically publishing
-it to the host. Before writing `slide-01.png`, write the adjacent hidden sidecar
-`.slide-01.png.artifact.json` containing `{"type":"intermediate_asset"}`.
+it to the host. Before writing `slide-01.png`, use the shared producer metadata
+helper to register `{"type":"intermediate_asset"}` for that path in internal storage.
 The marker applies to that exact file, including later revisions. Both output-text
 reference detection and workspace-diff detection honor it; neither guesses from
 directory names or extensions. Missing, malformed, or oversized (>4 KiB) metadata
-does not suppress publication. Publication sidecars and `.artifact-delivery.json`
-are protocol metadata: neither becomes an artifact or gets its own retention sidecar.
+does not suppress publication. Internal records and legacy publication sidecars
+and `.artifact-delivery.json` are protocol metadata: none becomes an artifact or
+gets its own retention record.
+
+An I/O error while opening publication records skips automatic artifact discovery
+for that result, preserving the successful tool result without risking publication
+of intermediates. Deletion-retention checks continue to reject mutations when
+their required records cannot be read.
 
 `generate_image` persists this metadata before returning, including `sha256` and
 `size_bytes`. Discovery enriches script-produced markers with these fields while
 the original exists. Within the same workspace, an unmarked byte-identical file
-inherits intermediate status after rename or copy, and receives its own sidecar.
-The old sidecar is retained as file provenance even when its image was moved.
+inherits intermediate status after rename or copy, and receives its own record.
+The old record is retained as file provenance even when its image was moved.
 This uses an index rebuilt per discovery call, not a process-global cache or
 separate session-state database, and works after runtime restart. Content hashing
 is bounded to 64 MiB per file and uses the existing workspace scan limits.
@@ -64,17 +111,18 @@ The bundled HTML/PPTX exporter, PPTX QA renderers (Poppler, pdf.js, and Quick Lo
 and SN renderers mark single-page screenshots and SN partial/focus review sheets
 this way, including partial images left by failed rendering. They leave the
 whole-deck overview and final HTML/PPTX unmarked. Tools can still read marked images for QA. If the user
-explicitly requests a screenshot as a deliverable, set its sidecar to
+explicitly requests a screenshot as a deliverable, register
 `{"type":"artifact"}` and reference the file in tool output, or return a structured
 `type: "artifact"` result. Markers do not retract previously published messages.
 
 ## Producer-declared delivery scopes
 
-A workflow can create `.artifact-delivery.json` in its work directory with
-`{"schema_version":1,"default":"intermediate"}`. This declares a directory
+A workflow can register its work directory with
+`{"schema_version":1,"default":"intermediate"}` through the shared producer
+scope helper. The declaration is kept in internal storage. This declares a directory
 boundary, not a filename heuristic or a session-global mode. Both structured
 tool results and automatic file discovery treat files within that scope as
-working files until the producer writes a per-file sidecar with `type: artifact`.
+working files until the producer registers a per-file record with `type: artifact`.
 These explicit registrations form the delivery list. Directory discovery stops
 at the session workspace boundary; other workspaces are unaffected.
 
@@ -280,15 +328,15 @@ and this document is updated in the same commit.
 ## Explicit publication tool
 
 `publish_artifact(path)` promotes an existing workspace file by writing its
-`type: artifact` sidecar and returning a structured artifact result. The shared
+`type: artifact` internal record and returning a structured artifact result. The shared
 engine emits the same `ArtifactEvent` consumed by CLI and ACP. Files previously
 marked intermediate can be promoted without changing their bytes. Missing or
-outside-workspace paths (including symlinks) are rejected; sidecar write failures
+outside-workspace paths (including symlinks) are rejected; metadata write failures
 return a failed tool result.
 
 Transaction inputs under the workspace's root-level `.box-agent-staging/`
 directory are internal and never delivered, even with a `type: artifact`
-sidecar. Only the final destination after `publish_artifact(action="commit")`
+record. Only the final destination after `publish_artifact(action="commit")`
 can be discovered and delivered under the normal publication rules.
 
 Already published files need no extra call: presentation builders and
@@ -299,7 +347,7 @@ may also include an optional producer-supplied `description`.
 ### Delivery placement
 
 Every normalized artifact event carries `placement`: `primary` when the producer
-explicitly registered the file with a `type: artifact` sidecar (including
+explicitly registered the file with a `type: artifact` record (including
 `publish_artifact` and final builder outputs), otherwise `supporting`. Merely
 writing or discovering a file does not declare it a final deliverable. CLI and
 ACP share this classification; ACP forwards it unchanged.

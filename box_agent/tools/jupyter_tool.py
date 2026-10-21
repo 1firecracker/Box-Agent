@@ -131,6 +131,8 @@ async def _start_sandbox_kernel(
 
 def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None, command_guard="") -> str:
     """Build kernel code that confines user writes to artifact/internal roots."""
+    from ..artifact_metadata import retention_directory
+
     roots = (
         workspace.resolve(),
         Path(tempfile.gettempdir()).resolve(),
@@ -143,8 +145,18 @@ def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None, comma
 import os as _box_guard_os
 import sys as _box_guard_sys
 import json as _box_guard_json
+import hashlib as _box_guard_hashlib
+import time as _box_guard_time
 {command_guard}
 if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
+    def _box_agent_audit_path(path, directory=-1):
+        if directory in (-1, None) or _box_guard_os.path.isabs(path):
+            return path
+        guard = getattr(_box_guard_sys, "_box_agent_command_guard", None)
+        if guard is None:
+            raise PermissionError("CHAT_REFERENCE_PROTECTED: cannot resolve mutation dir_fd")
+        return guard["_path"](path, directory)
+
     def _box_agent_path_is_writable(path):
         try:
             raw_path = _box_guard_os.fspath(path)
@@ -176,31 +188,130 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
             resolved = _box_guard_os.path.realpath(_box_guard_os.path.abspath(path))
             if isinstance(resolved, bytes):
                 resolved = _box_guard_os.fsdecode(resolved)
+            guard = getattr(_box_guard_sys, "_box_agent_command_guard", None)
+            if guard is not None:
+                guard["_check"](kind="mutation", path=resolved, operation=operation)
+                return
             if resolved.endswith(".artifact.json"):
                 folder, name = _box_guard_os.path.split(resolved)
                 if name.startswith("."):
                     resolved = _box_guard_os.path.join(folder, name[1:-len(".artifact.json")])
-            # Recreated kernels also honor caches written by other chats.
+            # Recreated kernels read central records and legacy markers without
+            # project imports. Bound every directory scan and fail closed.
+            deadline = _box_guard_time.monotonic() + 0.5
+            count = 0
+            def checked():
+                nonlocal count
+                count += 1
+                if count > 10000 or _box_guard_time.monotonic() >= deadline:
+                    raise PermissionError("CHAT_REFERENCE_PROTECTED: retention scan incomplete; preserve files")
+            def check_marker(marker, original=None):
+                checked()
+                if _box_guard_os.path.islink(marker):
+                    raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention cache; preserve files")
+                try:
+                    if _box_guard_os.path.getsize(marker) > (4096 if original else 16384):
+                        return
+                    with open(marker, encoding="utf-8") as stream:
+                        value = _box_guard_json.load(stream)
+                    if original is None:
+                        original = value.get("path")
+                        if not isinstance(original, str) or not _box_guard_os.path.isabs(original):
+                            return
+                        owner = value.get("workspace")
+                        if isinstance(owner, str) and _box_guard_os.path.isabs(owner):
+                            if (_box_guard_os.path.dirname(_box_guard_os.path.dirname(marker)) != getattr(_box_guard_sys, "_box_agent_retention_directory")
+                                    or _box_guard_os.path.basename(_box_guard_os.path.dirname(marker)) != _box_guard_hashlib.sha256(original.encode("utf-8")).hexdigest()
+                                    or _box_guard_os.path.basename(marker) != _box_guard_hashlib.sha256(owner.encode("utf-8")).hexdigest() + ".json"):
+                                return
+                            value = {{"retain_for_chat": True}}
+                        else:
+                            value = value.get("metadata")
+                            if not isinstance(value, dict) or _box_guard_os.path.basename(marker) != _box_guard_hashlib.sha256(original.encode("utf-8")).hexdigest() + ".json":
+                                return
+                        if len(_box_guard_json.dumps(value, ensure_ascii=False).encode("utf-8")) > 4096:
+                            return
+                    retained = value.get("retain_for_chat") is True
+                except FileNotFoundError:
+                    return
+                except (OSError, ValueError, AttributeError) as exc:
+                    if isinstance(exc, OSError):
+                        raise PermissionError("CHAT_REFERENCE_PROTECTED: cannot check retention cache; preserve files") from exc
+                    return
+                try:
+                    common = _box_guard_os.path.commonpath((original, resolved))
+                    affected = (original == resolved or common == resolved
+                        or _box_guard_os.path.isdir(original) and common == original
+                        or marker == resolved or _box_guard_os.path.commonpath((marker, resolved)) == resolved)
+                except ValueError:
+                    affected = False
+                if retained and affected and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
+                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
             candidates = [resolved]
             parent = _box_guard_os.path.dirname(resolved)
             while parent and parent != _box_guard_os.path.dirname(parent):
                 candidates.append(parent)
                 parent = _box_guard_os.path.dirname(parent)
-            if _box_guard_os.path.isdir(resolved):
-                for folder, _, files in _box_guard_os.walk(resolved):
-                    candidates.extend(_box_guard_os.path.join(folder, name[1:-len(".artifact.json")]) for name in files if name.startswith(".") and name.endswith(".artifact.json"))
+            stores = {{_box_guard_os.path.join(getattr(_box_guard_sys, "_box_agent_metadata_workspace"), ".box-agent", "artifact-metadata", "files")}}
             for candidate in candidates:
                 folder, name = _box_guard_os.path.split(candidate)
-                marker = _box_guard_os.path.join(folder, "." + name + ".artifact.json")
+                check_marker(_box_guard_os.path.join(folder, "." + name + ".artifact.json"), candidate)
+                stores.add(_box_guard_os.path.join(folder, ".box-agent", "artifact-metadata", "files"))
+            for store in stores:
+                for internal in (store, _box_guard_os.path.dirname(store), _box_guard_os.path.dirname(_box_guard_os.path.dirname(store))):
+                    if _box_guard_os.path.islink(internal):
+                        raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention storage; preserve files")
+                for candidate in candidates:
+                    digest = _box_guard_hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+                    check_marker(_box_guard_os.path.join(store, digest + ".json"))
+            if _box_guard_os.path.basename(_box_guard_os.path.dirname(resolved)) == "files":
+                check_marker(resolved)
+            shared = getattr(_box_guard_sys, "_box_agent_retention_directory")
+            for internal in (shared, _box_guard_os.path.dirname(shared), _box_guard_os.path.dirname(_box_guard_os.path.dirname(shared))):
+                if _box_guard_os.path.islink(internal):
+                    raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention storage; preserve files")
+            owners = [_box_guard_os.path.join(shared, _box_guard_hashlib.sha256(candidate.encode("utf-8")).hexdigest()) for candidate in candidates]
+            if _box_guard_os.path.isdir(resolved):
                 try:
-                    if _box_guard_os.path.getsize(marker) > 4096:
-                        continue
-                    with open(marker, encoding="utf-8") as stream:
-                        retained = _box_guard_json.load(stream).get("retain_for_chat") is True
-                except (OSError, ValueError, AttributeError):
-                    continue
-                if retained and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
-                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
+                    with _box_guard_os.scandir(shared) as entries:
+                        for entry in entries:
+                            checked()
+                            if entry.is_symlink():
+                                raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention storage; preserve files")
+                            if entry.is_dir(follow_symlinks=False):
+                                owners.append(entry.path)
+                except FileNotFoundError:
+                    pass
+            for owner in set(owners):
+                if _box_guard_os.path.islink(owner):
+                    raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention storage; preserve files")
+                try:
+                    with _box_guard_os.scandir(owner) as entries:
+                        for entry in entries:
+                            checked()
+                            if entry.name.endswith(".json"):
+                                check_marker(entry.path)
+                except FileNotFoundError:
+                    pass
+            if _box_guard_os.path.dirname(_box_guard_os.path.dirname(resolved)) == shared:
+                check_marker(resolved)
+            if _box_guard_os.path.isdir(resolved) and not _box_guard_os.path.islink(resolved):
+                pending = [resolved]
+                while pending:
+                    try:
+                        with _box_guard_os.scandir(pending.pop()) as entries:
+                            for entry in entries:
+                                checked()
+                                if entry.is_dir(follow_symlinks=False):
+                                    pending.append(entry.path)
+                                elif entry.name.startswith(".") and entry.name.endswith(".artifact.json"):
+                                    check_marker(entry.path, _box_guard_os.path.join(_box_guard_os.path.dirname(entry.path), entry.name[1:-len(".artifact.json")]))
+                                elif entry.name.endswith(".json") and _box_guard_os.path.basename(_box_guard_os.path.dirname(entry.path)) == "files" and _box_guard_os.path.basename(_box_guard_os.path.dirname(_box_guard_os.path.dirname(_box_guard_os.path.dirname(entry.path)))) == ".box-agent":
+                                    check_marker(entry.path)
+                                elif entry.is_symlink() and entry.name in {{".box-agent", "artifact-metadata", "files"}}:
+                                    raise PermissionError("CHAT_REFERENCE_PROTECTED: redirected retention storage; preserve files")
+                    except OSError as exc:
+                        raise PermissionError("CHAT_REFERENCE_PROTECTED: retention scan unavailable; preserve files") from exc
             for retained in getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
                 try:
                     common = _box_guard_os.path.commonpath((retained, resolved))
@@ -238,17 +349,20 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
         }} and args:
             # mkdir cannot destroy an existing reference. Libraries routinely
             # call mkdir(exist_ok=True) on a deliverable's parent directory.
-            if not _box_agent_path_is_writable(args[0]):
-                _box_agent_require_writable(args[0])
+            path = _box_agent_audit_path(args[0], args[2] if len(args) > 2 else -1)
+            if not _box_agent_path_is_writable(path):
+                _box_agent_require_writable(path)
         elif event in {{"os.remove", "os.rmdir", "os.unlink", "os.truncate"}} and args:
-            if event != "os.truncate" and len(args) > 1 and isinstance(args[-1], int) and args[-1] >= 0 and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
-                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
-            _box_agent_require_writable(args[0], "write" if event == "os.truncate" else "delete")
+            if event == "os.truncate":
+                _box_agent_require_writable(args[0])
+            else:
+                path = _box_agent_audit_path(args[0], args[1] if len(args) > 1 else -1)
+                _box_agent_require_writable(path, "delete")
         elif event in {{"os.rename", "os.replace"}} and len(args) >= 2:
-            if any(isinstance(fd, int) and fd >= 0 for fd in args[2:]) and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
-                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
-            _box_agent_require_writable(args[0], "move")
-            _box_agent_require_writable(args[1])
+            source = _box_agent_audit_path(args[0], args[2] if len(args) > 2 else -1)
+            destination = _box_agent_audit_path(args[1], args[3] if len(args) > 3 else -1)
+            _box_agent_require_writable(source, "move")
+            _box_agent_require_writable(destination)
         elif event in {{"shutil.copyfile", "shutil.copymode", "shutil.copystat"}} and len(args) >= 2:
             _box_agent_require_writable(args[1])
         elif event == "shutil.rmtree" and args:
@@ -266,6 +380,8 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
 _box_guard_sys._box_agent_write_roots = tuple(
     _box_guard_os.path.realpath(root) for root in {encoded_roots}
 )
+_box_guard_sys._box_agent_metadata_workspace = {str(workspace.resolve())!r}
+_box_guard_sys._box_agent_retention_directory = {str(retention_directory())!r}
 _box_guard_sys._box_agent_write_guard_enabled = True
 _box_guard_sys._box_agent_chat_paths = {protected!r}
 _box_guard_sys._box_agent_chat_delete = {allowed_deletions!r}
@@ -293,7 +409,7 @@ def _execute_with_kernel_write_guard(
 ) -> tuple[str, list[str], Optional[str]]:
     from .python_mutation_guard import PythonMutationGuard
 
-    guard = PythonMutationGuard(None)
+    guard = PythonMutationGuard({**os.environ, "BOX_AGENT_WORKSPACE_DIR": str(session.workspace.resolve())})
     try:
         setup_result = session.execute(
             _kernel_write_guard_setup_code(session.workspace, reference_policy, guard.kernel_setup_code()),

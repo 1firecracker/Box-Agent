@@ -38,13 +38,11 @@ import platform
 #   故按 /dev/shm 实际大小动态决定(env RENDER_FORCE_DISABLE_DEVSHM=1 强制加 / =0 强制不加)。
 #   ⚠️ 本补丁位于 skill 目录内,同步/覆盖 skill 会冲掉,覆盖后须重打(见 memory render-brokenpool-chromium-exhaustion)。
 def _mark_intermediate_artifact(filename):
-    """Mark this exact QA output for Box-Agent automatic artifact discovery."""
+    """Keep this exact QA output private during automatic artifact discovery."""
     from pathlib import Path
-
-    target = Path(filename)
-    target.with_name(f".{target.name}.artifact.json").write_text(
-        '{"type":"intermediate_asset"}\n', encoding="utf-8"
-    )
+    import runpy
+    helper = runpy.run_path(str(Path(__file__).with_name("artifact_metadata.py")))
+    helper["write_metadata"](filename, {"type": "intermediate_asset"})
 
 
 def _devshm_bytes():

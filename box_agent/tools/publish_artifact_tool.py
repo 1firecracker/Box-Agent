@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
 
-from box_agent.artifact_publication import STAGING_DIRECTORY, metadata_path, read_metadata, write_metadata
+from box_agent.artifact_publication import STAGING_DIRECTORY, write_metadata
+from box_agent.artifact_metadata import read_metadata
 from box_agent.tools.base import Tool, ToolResult, ToolInvocationRejected, check_tool_cancellation
 from box_agent.tools.file_change_receipts import (
     FileWriteInvocationContext, before_write, destination_lock, file_change_result,
@@ -164,7 +165,7 @@ class PublishArtifactTool(Tool):
                             return error
                         before = before_write(target)
                         write_metadata(target, {"type": "artifact", "sha256": digest.hexdigest(),
-                                                "size_bytes": sealed.stat().st_size})
+                                                "size_bytes": sealed.stat().st_size}, self.workspace_dir)
                         os.replace(sealed, target)
                     finally:
                         sealed.unlink(missing_ok=True)
@@ -180,7 +181,7 @@ class PublishArtifactTool(Tool):
             file = self._file(path or "")
             if file is None:
                 return ToolResult(success=False, error="File is missing or outside the workspace")
-            write_metadata(file, {**read_metadata(metadata_path(file)), "type": "artifact"})
+            write_metadata(file, {**read_metadata(file, self.workspace_dir), "type": "artifact"}, self.workspace_dir)
             return ToolResult(success=True, content=f"Published {file.relative_to(self.workspace_dir).as_posix()}.",
                               raw_output={"type": "artifact", "abs_path": str(file), "placement": "primary"})
         except ToolInvocationRejected:

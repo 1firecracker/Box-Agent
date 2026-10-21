@@ -53,7 +53,7 @@ def test_provenance_covers_every_file_and_records_integration_changes():
     assert "entry-two-outputs" in source["overlays"]
     assert "/Users/" not in json.dumps(source)
     actual = {p.relative_to(SUITE).as_posix() for p in SUITE.rglob("*")
-              if p.is_file() and "__pycache__" not in p.parts}
+              if p.is_file() and not {"__pycache__", "node_modules"}.intersection(p.parts)}
     assert actual == set(source["files"]) | {"source.json"}
     for relative, record in source["files"].items():
         data = (SUITE / relative).read_bytes()
@@ -76,6 +76,8 @@ def test_fonts_and_exporter_imports_remain_resolvable():
     exporter = SUITE / "skills/sn-ppt-standard/scripts/export_pptx"
     assert (exporter / "package-lock.json").is_file()
     for module in exporter.rglob("*.mjs"):
+        if "node_modules" in module.parts:
+            continue
         for specifier in re.findall(r"(?:from\s*|import\s*\()['\"](\.[^'\"]+)['\"]", module.read_text()):
             assert (module.parent / specifier).is_file(), (module, specifier)
     for relative in ["skills/sn-ppt-standard/assets/vendor/echarts.min.js", "skills/sn-ppt-dazzle/scripts/render_deck.py"]:

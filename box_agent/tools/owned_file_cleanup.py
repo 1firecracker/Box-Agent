@@ -9,6 +9,7 @@ import shlex
 import stat
 
 from .shell_inspection import inspect_shell_command
+from ..artifact_metadata import metadata_path, legacy_metadata_path
 
 
 class OwnedFileCleanup:
@@ -98,8 +99,8 @@ class OwnedFileCleanup:
             path = self.path(value, cwd)
             # Published or metadata-bearing files require the ordinary approval
             # flow. Never infer disposability from a QA/tmp filename.
-            metadata = path.with_name(f".{path.name}.artifact.json")
-            if metadata.exists() or metadata.is_symlink():
+            markers = (metadata_path(path, self.root), metadata_path(path), legacy_metadata_path(path))
+            if any(marker.exists() or marker.is_symlink() for marker in markers):
                 return False
             return path in self.files and self.fingerprint(path) == self.files[path]
         except (OSError, ValueError):

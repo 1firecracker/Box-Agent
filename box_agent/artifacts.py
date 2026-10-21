@@ -8,13 +8,13 @@ without importing ``box_agent.core``.
 from __future__ import annotations
 
 import hashlib
-import json
 import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from .artifact_metadata import read_metadata
 from .artifact_publication import is_publication_metadata
 from .events import ArtifactEvent
 from .roadmap_artifacts import roadmap_metadata_for_html_artifact
@@ -127,7 +127,6 @@ _EXT_MIME_OVERRIDES = {
     ".key": "application/vnd.apple.keynote",
 }
 _SAFE_NAME_RE = re.compile(r"[^a-z0-9._-]+")
-_ARTIFACT_METADATA_MAX_BYTES = 4096
 
 
 def _classify_kind(filename: str, mime: str | None) -> str:
@@ -173,17 +172,9 @@ def avoid_collision(directory: Path, filename: str) -> Path:
         index += 1
 
 
-def _artifact_metadata(path: Path) -> tuple[bool, str, str]:
+def _artifact_metadata(path: Path, workspace: str | Path | None = None) -> tuple[bool, str, str]:
     """Read producer-owned display metadata for one artifact path."""
-    metadata_path = path.with_name(f".{path.name}.artifact.json")
-    try:
-        if metadata_path.stat().st_size > _ARTIFACT_METADATA_MAX_BYTES:
-            return False, "", "supporting"
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False, "", "supporting"
-    if not isinstance(value, dict):
-        return False, "", "supporting"
+    value = read_metadata(path, workspace)
     is_intermediate = value.get("type") == "intermediate_asset"
     description = value.get("description")
     return (
@@ -233,7 +224,7 @@ def make_artifact(
         pass
 
     layout_id, edit_mode = roadmap_metadata_for_html_artifact(abs_resolved, size)
-    _, metadata_description, placement = _artifact_metadata(abs_resolved)
+    _, metadata_description, placement = _artifact_metadata(abs_resolved, workspace_root)
     resolved_description = (
         description.strip() if isinstance(description, str) else metadata_description
     )

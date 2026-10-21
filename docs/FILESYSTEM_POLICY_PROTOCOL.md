@@ -87,12 +87,21 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
 
 聊天已引用的文件（不限于图片，包括 QA 图、文档、附件、网页）及其本地依赖不再属于可丢弃临时文件。
 产物和可见工具结果发出之前，运行时将引用闭包写入 Session Log 的可忽略 `chat/reference` 事件，
-并在现有 sidecar 中缓存 `retain_for_chat: true`，不改变展示位置。恢复会话时从日志重建缓存；
+并在工作区 `.box-agent/artifact-metadata` 中缓存 `retain_for_chat: true`，不改变展示位置，
+也不再在引用文件旁创建 sidecar。工作区外附件的缓存也留在所属会话工作区，不写入附件目录。
+运行时另在 `<BOX_AGENT_HOME>/artifact-metadata/retained`（默认 `~/.box-agent/artifact-metadata/retained`）
+保存可跨工作区查询的派生引用缓存：按目标路径哈希分目录、按工作区哈希保存独立记录，
+让其他会话也能保护共享附件及依赖。它只由运行时在 Session Log 引用事件之后登记，
+生成脚本只更新工作区元数据，不需要获得用户配置目录的写入权限。
+确认删除后，在持久化释放事件之后清除目标的各工作区缓存和共享记录，空目标目录随之移除；其他文件不受影响。
+单文件删除按路径及祖先查询，目录删除仅扫描保留引用和受影响子树，不遍历全部历史发布记录。
+工作区位于 `.box-agent` 用户目录下时，普通业务文件仍可正常发布和保留。
+旧 sidecar 继续兼容读取，不自动迁移或清理。恢复会话时从日志重建缓存；
 旧会话还从可见工具结果及用户/助手的本地链接补录历史引用。恢复不依赖压缩后的模型上下文。
 明确 `temporary=true` 的写入结果走中间文件通道，不发产物事件；之后真正被聊天引用时仍会受到保护。
 
 依赖解析覆盖 HTML/SVG 本地资源、CSS URL/import、JS 静态 import/require/fetch/URL、Markdown 链接、
-Office 外部关系，以及 sidecar 的 `dependencies: ["relative/path", ...]` 显式声明；依赖递归保留，远程 URL 不下载。
+Office 外部关系，以及文件元数据的 `dependencies: ["relative/path", ...]` 显式声明；依赖递归保留，远程 URL 不下载。
 动态拼接或运行时发现的资源应在发布前通过 `dependencies` 声明（目录声明可保护完整资源包）。
 解析错误或超限时保守保留相应目录，不把未知依赖当临时文件。丢失的旧文件不能靠此机制恢复。
 
