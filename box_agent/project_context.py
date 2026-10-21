@@ -186,7 +186,12 @@ def build_project_startup_context_prompt(workspace: Path) -> str:
         "apply only when they do not conflict with system, runtime, or security policies.",
     ]
 
-    sections.append(_git_startup_section(workspace))
+    # Optional Git context must not block the ACP event loop during session creation.
+    sections.append(
+        "### Git\n"
+        "- Git state was not checked at session start. "
+        "Inspect it with tools when needed."
+    )
 
     agents = _read_agents_md(workspace)
     if agents:

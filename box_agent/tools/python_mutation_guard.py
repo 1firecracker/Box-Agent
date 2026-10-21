@@ -82,7 +82,8 @@ def _audit(event, args):
     if event in ("os.remove", "os.rmdir"):
         _check(kind="mutation", path=_path(args[0], args[1]), operation="delete")
     elif event == "shutil.rmtree":
-        _check(kind="mutation", path=_path(args[0], args[1]), operation="delete")
+        # Python 3.10 emits only path; newer versions also include dir_fd.
+        _check(kind="mutation", path=_path(args[0], args[1] if len(args) > 1 else None), operation="delete")
     elif event == "os.rename":
         # Replacing a published destination is an edit; only its source moves.
         _check(kind="mutation", path=_path(args[0], args[2]), operation="move")

@@ -3901,6 +3901,9 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
     llm = ActiveMCPLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [tool], "system")
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    # This test exercises status updates after an available tool is used.
+    # Local mcp_config remains deferred even with eager remote MCP loading.
+    agent._sessions[session.sessionId].agent.local_tool_exposure.require_tools([tool_name])
     response = await agent.prompt(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Use MCP"}], field_meta={},
     ))
