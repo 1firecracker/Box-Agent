@@ -2,7 +2,8 @@
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
 descriptions, PPT entry contracts, tool handoffs, child execution, background
-retention, connector search and managed runtimes apply before exact comparisons.
+retention, connector search, managed runtimes and schedule frequency descriptions
+apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -130,6 +131,9 @@ _BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
 )
 _JSONL_DESCRIPTION_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/jsonl_description_changes.json").read_text()
+)
+_SCHEDULE_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/schedule_schema_changes.json").read_text(encoding="utf-8")
 )
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
@@ -343,8 +347,23 @@ def _normalized_schema(schema, profile):
     return json.loads(serialized.replace(json.dumps(str(profile), ensure_ascii=False)[1:-1], "<PROFILE>"))
 
 
+def _apply_schedule_schema_changes(schema):
+    expected = deepcopy(schema)
+    for change in _SCHEDULE_SCHEMA_CHANGES["create_scheduled_task"]:
+        target = expected
+        *parents, field = change["path"]
+        for key in parents:
+            target = target[key]
+        assert target[field] == change["before"], change["path"]
+        target[field] = change["after"]
+    return expected
+
+
 def _assert_schema_contract(tools, profile):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
+    expected["create_scheduled_task"]["schema"] = _apply_schedule_schema_changes(
+        expected["create_scheduled_task"]["schema"],
+    )
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
