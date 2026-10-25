@@ -255,6 +255,27 @@ async def test_omitted_image_strategy_follows_declared_main_model_capability(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tags, native", [(None, True), (["vision"], True), ([], False)])
+async def test_omitted_image_strategy_uses_tags_before_model_allowlist(
+    tmp_path, tags, native,
+):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+    proxy = FakeVisionLLM()
+    main = SimpleNamespace(model="gpt-5.5")
+    if tags is not None:
+        main.auto_model_candidates = ({"model": "gpt-5.5", "tags": tags},)
+    tool = _tool(tmp_path, proxy, native_capability_llm=main)
+
+    result = await tool.invoke(
+        {"image_paths": ["slide.png"], "instruction": "Describe it."}
+    )
+
+    assert result.success
+    assert result.image_context_eligible is native
+    assert proxy.calls == (0 if native else 1)
+
+
+@pytest.mark.asyncio
 async def test_omitted_image_strategy_tracks_main_model_rebinding_and_explicit_proxy(tmp_path):
     (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
     proxy = FakeVisionLLM()
@@ -658,6 +679,7 @@ def test_add_workspace_tools_omits_inspect_images_for_known_text_only_model(
     class TextOnlyLLM:
         model = "deepseek-v4-pro"
         api_base = "https://api.deepseek.com"
+        capabilities = {"image_input": False}
 
     tools = []
 

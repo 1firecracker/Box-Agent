@@ -87,6 +87,52 @@ inspection model is available, with an explicit not-delivered explanation.
 Standard ACP image blocks are redacted to MIME and size metadata in diagnostic
 traces as well as kept out of SessionLog message content.
 
+## Image-input capability
+
+CLI, ACP, image inspection and CUA share `image_input_support()` in
+`box_agent/llm/capabilities.py`. It resolves support in this order:
+
+1. Explicit adapter `supports("image_input")` or `capabilities.image_input`.
+   YAML `image_input: true/false` and model-profile `imageInput` populate this
+   declaration and remain authoritative, including explicit `false`.
+2. The current model's catalog `tags`. A valid collection containing `vision`
+   enables image input. A collection without it, including `[]`, disables it
+   even for an allowlisted model.
+3. The maintained `_IMAGE_INPUT_MODELS` allowlist, only when the current
+   model's tags are absent or malformed. Matching is case-insensitive substring
+   containment: `sn-kimi-k3`, `openai/gpt-6.1-sol` and dated/provider-specific
+   variants match their registered model name. Broad vendor names alone do not.
+4. Otherwise the result is unknown (`None`). Unknown models do not enable
+   automatic CUA screenshot injection or the default native inspection strategy.
+   Existing explicit-native and proxy behavior is unchanged.
+
+The host's `/api/web/llm/v2/model_catalog` response supplies the tags through
+`autoRouting.models`; this lookup does not fetch the catalog itself. A host
+that omits these tags, including a manual binding, uses the allowlist or an
+explicit capability. Gateway aliases that contain no registered model name
+must carry a declaration to gain automatic native image support. Generic
+substrings such as `vision` and provider URLs are not capability declarations.
+If an alias reuses a vision model's name for a text-only backend, set an explicit
+`false` capability or pass its non-vision tags to override the fallback.
+
+The initial allowlist covers verified flagship and vision models from the
+following providers. Its model-name patterns live in the Python constant.
+Check the provider's image-input documentation before adding a pattern; do not
+add an entire vendor prefix. References checked on 2026-10-25:
+
+| Provider | Image-input references |
+| --- | --- |
+| OpenAI | [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), [GPT-6 Sol/Luna and GPT-5.6](https://developers.openai.com/api/docs/changelog), [image inputs](https://developers.openai.com/api/docs/guides/images-vision) |
+| Anthropic | [Claude model capabilities and IDs](https://platform.claude.com/docs/en/models/overview) |
+| Google | [Gemini 4 Argon](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon), [Gemini 3.8 Flash](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash), [Gemini 3.1 Pro](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview) |
+| Alibaba | [Qwen visual understanding models](https://help.aliyun.com/en/model-studio/vision-model/) |
+| Moonshot | [Kimi vision inputs](https://platform.kimi.ai/docs/guide/use-kimi-vision-model), [K3.1 Pro and Highspeed](https://platform.kimi.ai/docs/get-your-api-key), [K2.5](https://forum.moonshot.ai/t/kimi-k2-5-api-is-now-available/218) |
+| Z.ai | [GLM-5.3-Flash/FlashX](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash), [GLM-4.6V](https://docs.z.ai/guides/vlm/glm-4.6v); [GLM-5.3](https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3) is text-only and excluded |
+| ByteDance | [Ark model list](https://console.volcengine.com/ark/region%3Acn-beijing/docs/model-list), [image understanding model versions](https://docs.volcengine.com/docs/vector_database_vikingdb/chat_completionsNew?lang=en) |
+| DeepSeek | [Flash vision](https://api-docs.deepseek.com/guides/vision/), [current model modalities](https://api-docs.deepseek.com/api/list-models/); V4 Pro is text-only and excluded |
+| MiniMax | [M3.1-Flash/M3 image input](https://platform.minimax.io/docs/api-reference/text-anthropic-api); M2.x is text-only and excluded |
+| xAI | [Grok 4.7](https://docs.x.ai/developers/models/grok-4.7), [Grok 4.3](https://docs.x.ai/developers/models/grok-4.3) |
+
 ## Restore, summary, reset and copy
 
 Replay rebuilds the image catalog from original events independently of the
