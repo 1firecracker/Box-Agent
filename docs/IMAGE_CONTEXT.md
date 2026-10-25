@@ -159,7 +159,7 @@ images keep their audit references; they remain unavailable on restore.
 Existing referenced Skill snapshots are copied too, so the text history stays
 restorable without relying on the source session directory.
 
-Existing continuation protocol versions accept optional per-message
+The v1 continuation protocol accepts optional per-message
 `image_refs` and a `source_session_id`. Import resolves images only through a
 trusted source SessionLog with matching workspace and original message
 association. It copies snapshots and preserves age, eviction and delivery
