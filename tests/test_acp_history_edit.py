@@ -303,3 +303,92 @@ async def test_duplicate_edit_does_not_cancel_its_already_running_turn(tmp_path)
         if running is not None:
             await asyncio.gather(running, return_exceptions=True)
         await host.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_source", [False, True])
+async def test_edited_branch_copies_session_images_and_preserves_inference_age(tmp_path, close_source):
+    llm = CaptureLLM()
+    llm.capabilities = {"image_input": True}
+    host = adapter(tmp_path, llm)
+    encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    try:
+        original = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-source"}))
+        await host.prompt(SimpleNamespace(sessionId=original.sessionId, field_meta={}, prompt=[
+            {"type": "text", "text": "Remember this image."},
+            {"type": "image", "data": encoded, "mimeType": "image/png"},
+        ]))
+        source_state = host._sessions[original.sessionId]
+        source_log = source_state.agent.session_log
+        projection = source_log.replay()
+        image_ref = projection.images[0]
+        prior_user = next(message for message in projection.messages if message.role == "user")
+        if close_source:
+            await source_state.aclose()
+            source_log.close()
+            host._sessions.pop(original.sessionId)
+        branch = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-branch"}))
+        seed = {
+            "schema_version": "officev3-session-continuation/v1", "product_session_id": "image-branch",
+            "reason": "history_edit", "truncated": False, "source_session_id": "image-source",
+            "messages": [{"role": "user", "content": prior_user.content,
+                          "image_refs": [{"imageId": image_ref["imageId"]}]}],
+        }
+        await host.prompt(SimpleNamespace(
+            sessionId=branch.sessionId, prompt=[{"text": "Continue."}],
+            field_meta={"turn_id": "branch-1", "session_continuation": seed},
+        ))
+        branch_log = host._sessions[branch.sessionId].agent.session_log
+        assert branch_log.replay().model_round == projection.model_round + 1
+        copied = branch_log.replay().images[0]
+        assert copied["createdRound"] == image_ref["createdRound"]
+        assert (branch_log.path.parent / copied["contentRef"]).read_bytes()
+        assert encoded not in branch_log.path.read_text()
+        assert any(isinstance(message.content, list) for message in llm.requests[-1])
+        await host.prompt(request(branch, "Third inference.", "branch-2"))
+        assert any(isinstance(message.content, list) and any(block.get("type") == "input_image" for block in message.content)
+                   for message in llm.requests[-1])
+        await host.prompt(request(branch, "Fourth inference.", "branch-3"))
+        assert not any(isinstance(message.content, list) and any(block.get("type") == "input_image" for block in message.content)
+                       for message in llm.requests[-1])
+        assert branch_log.replay().images[0]["evictionReason"] == "round_limit"
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_edit_restores_only_prefix_images_and_their_inference_age(tmp_path, restart):
+    llm = CaptureLLM()
+    llm.capabilities = {"image_input": True}
+    host = adapter(tmp_path, llm)
+    encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    try:
+        session = await host.newSession(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"session_id": "image-revision"},
+        ))
+        for turn_id in ("t1", "t2"):
+            await host.prompt(SimpleNamespace(
+                sessionId=session.sessionId, field_meta={"turn_id": turn_id},
+                prompt=[{"type": "text", "text": turn_id},
+                        {"type": "image", "data": encoded, "mimeType": "image/png"}],
+            ))
+        log = host._sessions[session.sessionId].agent.session_log
+        original_images = log.replay().images
+        assert len(original_images) == 2
+        await host.prompt(request(session, "Replace the second turn.", "t3", edit("t2")))
+        state = host._sessions[session.sessionId]
+        assert [ref["imageId"] for ref in state.agent.image_context.images] == [original_images[0]["imageId"]]
+        assert log.replay().model_round == 2
+        assert len([block for message in llm.requests[-1] if isinstance(message.content, list)
+                    for block in message.content if block.get("type") == "input_image"]) == 1
+        if restart:
+            session = await host.newSession(SimpleNamespace(
+                cwd=str(tmp_path), field_meta={"session_id": "image-revision"},
+            ))
+        await host.prompt(request(session, "Third accepted inference.", "t4"))
+        assert any(isinstance(message.content, list) for message in llm.requests[-1])
+        await host.prompt(request(session, "Fourth accepted inference.", "t5"))
+        assert not any(isinstance(message.content, list) for message in llm.requests[-1])
+    finally:
+        await host.aclose()
