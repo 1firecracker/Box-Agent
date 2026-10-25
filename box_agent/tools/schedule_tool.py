@@ -49,7 +49,7 @@ _CRON_FIELD_RANGES = (
 
 
 def _validate_cron_field(field: str, low: int, high: int) -> bool:
-    """校验单个 cron 字段：支持 ``*`` / ``a`` / ``a-b`` / ``*/n`` / ``a-b/n`` 及逗号列表。"""
+    """校验单个 cron 字段：支持 ``*`` / ``a`` / ``a-b`` / ``*/n`` / ``a/n`` / ``a-b/n`` 及逗号列表。"""
     field = field.strip()
     if not field:
         return False
@@ -110,7 +110,8 @@ def _validate_cron(expr: str) -> tuple[bool, str]:
         elif "-" in base:
             start, end = map(int, base.split("-"))
         else:
-            start = end = int(base)
+            start = int(base)
+            end = 59 if separator else start
         minutes.update(range(start, end + 1, step))
     # Multiple minutes repeat within every matching hour, less than 60 minutes apart.
     if len(minutes) != 1:

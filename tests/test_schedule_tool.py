@@ -76,6 +76,7 @@ async def test_cron_ranges_and_steps_ok(tool):
 @pytest.mark.parametrize("expr", [
     "* * * * *", "*/10 * * * *", "0,30 * * * *",
     "0-59 9 * * *", "*/15 9-18 * * 1-5", "0,59 9,10 * * *",
+    "0/1 * * * *", "5/10 * * * *", "58/1 * * * *", "5/10,55 * * * *",
 ])
 async def test_subhourly_schedules_fail_without_draft(tool, expr):
     result = await tool.execute(name="t", prompt="p", cron_expr=expr)
@@ -87,6 +88,7 @@ async def test_subhourly_schedules_fail_without_draft(tool, expr):
 @pytest.mark.parametrize("expr", [
     "0 * * * *", "17 * * * *", "59 23,0 * * *",
     "0,0 * * * *", "17-17 * * * *", "*/60 * * * *",
+    "17/60 * * * *", "58/2 * * * *", "59/1 * * * *",
 ])
 async def test_hourly_or_slower_schedules_preserve_expression(tool, expr):
     result = await tool.execute(name="t", prompt="p", cron_expr=expr)
