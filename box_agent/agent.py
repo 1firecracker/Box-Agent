@@ -643,6 +643,9 @@ class Agent:
         """Restore durable session facts without writing new history."""
         self._pending_skill_restore = []
         self.messages[:] = [self.messages[0], *projection.messages]
+        self.image_context.reset()
+        self.image_context.model_round = getattr(projection, "model_round", 0)
+        self.image_context.add_references(getattr(projection, "images", []))
         self.restore_goal(projection.goal)
         plan_tool = self.tools.get("plan_write")
         configure_plan = getattr(plan_tool, "configure_session_persistence", None)

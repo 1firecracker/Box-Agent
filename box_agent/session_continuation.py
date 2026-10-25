@@ -173,13 +173,14 @@ def import_continuation_images(
     """
     from .image_store import SessionImageStore
     from .image_context import ImageContext
+    from .session_history import effective_events
 
     if continuation.source_session_id != source_log.header.get("id"):
         raise ValueError("CONTINUATION_IMAGE_SOURCE_MISMATCH")
     source_log.assert_workspace(destination_log.header["cwd"])
     projection = source_log.replay()
     catalog = {item["imageId"]: item for item in ImageContext(source_log).images}
-    events = {event["seq"]: event for event in source_log.events}
+    events = {event["seq"]: event for event in effective_events(source_log.events)}
     catalog_order = {image_id: index for index, image_id in enumerate(catalog)}
     # The semantic protocol has no tool messages. A tool image therefore stays
     # attached to the original user task, identified through its assistant call

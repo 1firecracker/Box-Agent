@@ -57,7 +57,9 @@ class CuaBindings:
     image_source = "cua"
 
     def allows_image_context(self, *, server_name: str, remote_name: str) -> bool:
-        return self.allows_transient_followup(server_name=server_name, remote_name=remote_name)
+        return self.config.persist_images and self.allows_transient_followup(
+            server_name=server_name, remote_name=remote_name,
+        )
 
     def image_context_for_result(self, **kwargs: Any) -> list[dict[str, Any]] | None:
         """Return private images for shared session retention and persistence."""

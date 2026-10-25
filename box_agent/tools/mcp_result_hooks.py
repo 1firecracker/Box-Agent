@@ -63,11 +63,14 @@ def allowed_mcp_result_adapters(
 ) -> tuple[MCPResultAdapter, ...]:
     allowed = []
     for adapter in _CURRENT.get():
-        # Image-context adapters use the durable attachment seam, not the
-        # legacy one-shot overlay. Keep ordinary transient adapters unchanged.
-        if callable(getattr(adapter, "image_context_for_result", None)):
-            continue
         try:
+            # Use shared retention only when enabled for this result. An
+            # adapter with persistence disabled may still allow a one-shot image.
+            image_context = getattr(adapter, "image_context_for_result", None)
+            allows_context = getattr(adapter, "allows_image_context", None)
+            if (callable(image_context) and callable(allows_context)
+                    and allows_context(server_name=server_name, remote_name=remote_name)):
+                continue
             if adapter.allows_transient_followup(
                 server_name=server_name, remote_name=remote_name,
             ):

@@ -198,7 +198,7 @@ async def test_screenshot_return_path_can_be_reloaded_from_another_workspace(tmp
         image_paths=[path], instruction="Inspect this screenshot", strategy="native",
     )
     assert loaded.success, loaded.error
-    assert any(b["type"] == "input_image" for b in loaded.transient_followup_content)
+    assert any(b["type"] == "input_image" for b in loaded.image_content)
 
 
 def _image_messages(messages):
@@ -211,8 +211,9 @@ def _image_messages(messages):
 
 @pytest.mark.parametrize("capability", [True, False, None])
 @pytest.mark.parametrize("feed_screenshots", [True, False])
-async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
-    tmp_path, capability, feed_screenshots,
+@pytest.mark.parametrize("persist_images", [True, False])
+async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
+    tmp_path, capability, feed_screenshots, persist_images,
 ):
     from box_agent.agent_session import AgentSession
     from box_agent.events import DoneEvent, StopReason
@@ -242,7 +243,10 @@ async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
                 yield StreamEvent(type="finish", finish_reason="stop")
 
     config = session_config(tmp_path, max_steps=5)
-    config.plugins["cua"] = {"server_name": "desktop", "feed_screenshots": feed_screenshots}
+    config.plugins["cua"] = {
+        "server_name": "desktop", "feed_screenshots": feed_screenshots,
+        "persist_images": persist_images,
+    }
     llm = ScreenshotThenGoalLLM()
     session_log = SessionLog.create(tmp_path / "logs", session_id="vision", cwd=tmp_path)
     session = await AgentSession.open(
@@ -261,24 +265,26 @@ async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
         assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.END_TURN]
         assert len(llm.requests) == 3
         assert [len(_image_messages(request)) for request in llm.requests] == (
-            [0, 1, 1] if capability is True and feed_screenshots else [0, 0, 0]
+            [0, 1, int(persist_images)] if capability is True and feed_screenshots else [0, 0, 0]
         )
         if capability is True and feed_screenshots:
             overlay = _image_messages(llm.requests[1])[0]
             assert overlay.role == "user"
             assert overlay.trace_redact_content
             assert any(block.get("data") for block in overlay.content if block.get("type") == "input_image")
-            assert _image_messages(llm.requests[2])
+            assert bool(_image_messages(llm.requests[2])) is persist_images
             assert not _image_messages(session.agent.messages)
         else:
             assert not _image_messages(session.agent.messages)
         session_log.flush()
         images = session_log.replay().images
-        assert len(images) == 1
-        assert images[0]["active"] is (capability is True and feed_screenshots)
+        assert len(images) == int(persist_images)
+        if images:
+            assert images[0]["active"] is (capability is True and feed_screenshots)
         replay_text = [str(message.content) for message in session_log.replay().messages]
-        assert any("images/" in content for content in replay_text)
-        assert list((session_log.path.parent / "images").glob("*.png"))
+        assert any("images/" in content for content in replay_text) is persist_images
+        assert bool(list((session_log.path.parent / "images").glob("*.png"))) is persist_images
+        assert _image_b64() not in session_log.path.read_text()
         assert current_mcp_result_adapters() == ()
         assert "run_events" not in vars(session.agent)
     finally:

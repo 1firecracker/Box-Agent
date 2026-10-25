@@ -82,10 +82,19 @@ omitting strategy selects native only for declared image support; otherwise it
 uses the configured proxy route. Explicit proxy results remain text input to
 the main model; their optional archive is ineligible for automatic injection.
 Other tools' `transient_followup_content` retains its one-request semantics.
+With CUA `persist_images: false`, screenshots also use a one-request overlay
+when feeding is enabled and the model supports vision; they create no archived
+image files or durable image references. Disabling `feed_screenshots` independently
+prevents automatic model input while permitting archival when configured.
 ACP path attachments still receive a permission-checked snapshot when no
 inspection model is available, with an explicit not-delivered explanation.
 Standard ACP image blocks are redacted to MIME and size metadata in diagnostic
 traces as well as kept out of SessionLog message content.
+
+Same-session history edits retain the current `history_edit` protocol. Restoring
+a prefix restores its image occurrences and committed inference counter together;
+images from discarded turns remain in the audit archive but leave live context.
+Cross-session image continuation uses the bounded v1 continuation protocol.
 
 ## Image-input capability
 
