@@ -24,12 +24,95 @@ from box_agent.tools.bash_tool import (
     BashTool,
     _truncate_bash_output,
     _truncate_bash_streams,
+    _query_exit_outcome,
 )
 from box_agent.tools.argument_limits import MAX_BASH_COMMAND_CHARS
+from box_agent.tools.file_result_adapter import _tool_message_content_for_model
 from box_agent.tools.pptx_safety import (
     _SYNC_IMAGE_STATUS_SCRIPT,
     detect_pptx_image_status_command_bypass,
 )
+
+
+@pytest.mark.parametrize("command", [
+    "exit 1", "python -c 'raise SystemExit(1)'", "git diff --exit-code",
+    "grep missing a && echo done", "false | grep missing", "diff a b | cat",
+    "cd missing && grep x a", "env grep x a", "! grep x a", "grep x a 2>/dev/null",
+    "grep $(false) a", "grep `false` a", "grep x <(false)", "bash -c 'grep x a'",
+    "grep () { return 1; }; grep x a", "$QUERY x a", "grep x a; exit 1",
+])
+def test_query_exit_does_not_reclassify_ambiguous_or_unrelated_failure(command):
+    assert _query_exit_outcome(command, 1, "") is None
+
+
+@pytest.mark.parametrize(("command", "outcome"), [
+    ("grep 'a|b' a.txt", "no_matches"), ("rg 'a;b' a.txt", "no_matches"),
+    ("diff a.txt b.txt", "differences"),
+])
+def test_query_exit_recognizes_only_normal_exit_one(command, outcome):
+    assert _query_exit_outcome(command, 1, "") == outcome
+    assert _query_exit_outcome(command, 2, "") is None
+    assert _query_exit_outcome(command, 1, "read error") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Local POSIX tools; Windows mode tested separately")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "exit_code", "success", "outcome"), [
+    ("grep absent a.txt", 1, True, "no_matches"),
+    ("grep -c absent a.txt", 1, True, "no_matches"),
+    ("diff a.txt b.txt", 1, True, "differences"),
+    ("grep alpha a.txt", 0, True, None),
+    ("diff a.txt a.txt", 0, True, None),
+    ("grep x missing.txt", 2, False, None),
+    ("diff a.txt missing.txt", 2, False, None),
+    ("diff a.txt b.txt | cat", 1, False, None),
+    ("grep absent a.txt && echo SHOULD_NOT_RUN", 1, False, None),
+    ("grep absent a.txt; echo CONTINUED", 0, True, None),
+    ("printf prior_output; printf error_output >&2; exit 1", 1, False, None),
+])
+async def test_query_results_keep_native_exit_codes_and_model_diagnostics(tmp_path, command, exit_code, success, outcome):
+    (tmp_path / "a.txt").write_text("alpha\n")
+    (tmp_path / "b.txt").write_text("beta\n")
+    result = await BashTool(workspace_dir=str(tmp_path), non_interactive=True).execute(command=command)
+    assert result.exit_code == exit_code
+    assert result.success is success, result.error
+    assert (result.raw_output or {}).get("command_outcome") == outcome
+    model_content = _tool_message_content_for_model(
+        tool_name="bash", arguments={"command": command}, result=result,
+        visible_content=result.content, visible_error=result.error,
+    )
+    if command.startswith("diff a.txt b.txt"):
+        assert "< alpha" in model_content and "> beta" in model_content
+    if "SHOULD_NOT_RUN" in command:
+        assert "SHOULD_NOT_RUN" not in result.stdout
+    if "CONTINUED" in command:
+        assert "CONTINUED" in result.stdout
+    if "prior_output" in command:
+        assert "prior_output" in model_content and "error_output" in model_content
+    if outcome:
+        assert "normal query result" in model_content
+        assert not model_content.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("windows", "bundled", "stderr", "expected"), [
+    (True, False, b"", False), (True, True, b"", True),
+    (False, False, b"warning" * 10000, False),
+])
+async def test_query_exit_respects_shell_mode_and_stderr_before_truncation(tmp_path, monkeypatch, windows, bundled, stderr, expected):
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+    tool.is_windows = windows
+    tool._bundled_win_bash = Path("bash.exe") if bundled else None
+    class Process:
+        returncode = 1
+        async def communicate(self):
+            return b"", stderr
+    async def create(*args, **kwargs):
+        return Process()
+    monkeypatch.setattr(tool, "_create_subprocess", create)
+    result = await tool.execute(command="grep absent a.txt")
+    assert result.exit_code == 1
+    assert result.success is expected
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group integration")

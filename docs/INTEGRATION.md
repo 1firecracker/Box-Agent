@@ -30,6 +30,24 @@ wire 格式，但底层共享 core/tool 行为仍可能一致。
 
 ## 典型对接场景
 
+### 查询结果与可恢复的工具拦截
+
+单条、无包装和控制语法的 POSIX `grep` / `rg` 无匹配以及 `diff` 有差异，
+退出码仍为 1，但工具结果为成功，`rawOutput.command_outcome` 分别为
+`no_matches` / `differences`。该字段可选，旧宿主无需更改。PowerShell、复合命令、
+管道、重定向及无法确定来源的非零退出码不自动放行；优先使用独立 `grep` 工具。
+失败命令的 stdout 和 stderr 一起保留在模型错误诊断中，沿用 8,000 字符截断预算。
+
+托管浏览器收到明确的会话终止或已关闭传输错误后，丢弃当前会话缓存并返回
+`BROWSER_SESSION_RESET`；下一次调用重新建立浏览器上下文。其他会话不受影响。
+失败动作不会自动重放，可能已发生副作用；恢复后先导航、检查页面并获取新元素引用。
+普通页面错误和导航超时不触发会话重置。
+
+`CHAT_REFERENCE_PROTECTED`、`CHAT_REFERENCE_DELETE_DENIED` 和
+`BROAD_HOME_SEARCH_BLOCKED` 仍是失败结果，不能当作授权或执行成功。
+宿主可分别展示文件保留、删除取消及缩小搜索范围提示；Agent 对重复拦截给出停止重试提示。
+一次性脚本使用已有 `$BOX_AGENT_SCRATCH_DIR`，不将其发布或链接为交付物。
+
 ### 同一产品会话的并发请求
 
 `session/new._meta.session_id` 是宿主的稳定产品会话 ID，与返回的 ACP

@@ -484,6 +484,14 @@ def _assert_schema_contract(tools, profile):
                 "Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.\n"
                 "  - For temporary script outputs elsewhere,",
             )
+            scratch_anchor = '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+            assert entry["schema"]["description"].count(scratch_anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                scratch_anchor,
+                '  - Put disposable patch/check scripts and other intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm or publish/link temporary scripts as deliverables\n'
+                '  - If cleanup returns CHAT_REFERENCE_PROTECTED, leave those files in place and continue the task. Do not retry via another command/tool or ask for automatic-cleanup approval\n'
+                '  - Prefer the grep tool for searches (no matches is a normal empty result). Shell grep/rg exit 1 means no matches; diff exit 1 means differences. Use separate calls for queries: compound commands and pipelines retain native failure/short-circuit semantics. Do not mask errors with blanket `|| true`\n',
+            )
             entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
                 "type": "array", "items": {"type": "string"}, "maxItems": 64,
                 "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",

@@ -19,6 +19,28 @@ from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.engine import artifact_results
 
 
+@pytest.mark.parametrize("code", ["CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"])
+def test_repeated_policy_blocks_across_tools_keep_first_guidance_and_stop_retry_hint(tmp_path, code):
+    messages = []
+    counts = {}
+    for index, tool_name in enumerate(["bash", "execute_code"]):
+        error = f"{code}: Preserve file {index}; continue the task."
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"call-{index}", tool_name=tool_name,
+            arguments={}, result=ToolResult(success=False, error=error),
+            visible_content="", visible_error=error,
+            result_storage=ToolResultStorage(tmp_path), framework_error_counts=counts,
+        ))
+        assert not outcome.events[0].success
+        assert outcome.visible_error == error
+        if index == 0:
+            assert "Preserve file 0" in outcome.model_content
+        else:
+            assert "REPEATED_FRAMEWORK_FAILURE" in outcome.model_content
+            assert "Do not retry" in outcome.model_content
+            assert code in outcome.model_content
+
+
 class _OneToolCallLLM:
     def __init__(self, tool_name: str, arguments: dict | None = None) -> None:
         self._tool_name = tool_name

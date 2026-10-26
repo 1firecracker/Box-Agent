@@ -24,6 +24,33 @@ from box_agent.tools.ripgrep_tool import (
 RG = shutil.which("rg")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_class", [GrepTool, GlobTool])
+async def test_whole_home_search_stays_blocked_with_specific_location_guidance(tmp_path, monkeypatch, tool_class):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    tool = tool_class(workspace_dir=str(tmp_path), executable="rg")
+    result = await tool.execute(pattern="report", path=str(fake_home))
+    assert not result.success
+    assert result.error.startswith("BROAD_HOME_SEARCH_BLOCKED:")
+    assert "~/Desktop" in result.error
+    assert "Do not retry the same scope with another tool" in result.error
+
+
+@pytest.mark.asyncio
+async def test_legacy_search_keeps_same_home_protection_and_recovery_guidance(tmp_path, monkeypatch):
+    from box_agent.tools.file_tools import SearchFilesTool
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    result = await SearchFilesTool(workspace_dir=str(tmp_path)).execute(pattern="report", path=str(fake_home))
+    assert not result.success
+    assert result.error.startswith("BROAD_HOME_SEARCH_BLOCKED:")
+    assert "~/Desktop" in result.error
+    assert "Do not retry the same scope with another tool" in result.error
+
+
 def require_rg() -> str:
     if RG is None:
         if os.environ.get("BOX_AGENT_TEST_REQUIRE_RG"):

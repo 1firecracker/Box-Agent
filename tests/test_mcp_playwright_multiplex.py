@@ -601,6 +601,62 @@ async def test_derived_sub_agent_keys_get_distinct_server_sessions(monkeypatch):
     assert conn.session_pool is None
 
 
+async def test_http_session_deleted_on_server_recovers_through_real_sdk_without_replay():
+    from contextlib import AsyncExitStack
+
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    from box_agent.tools.playwright_session_pool import PlaywrightSessionPool
+
+    server = ManagedHttpServerProcess(
+        name="playwright", command=sys.executable,
+        args=["-c", _FAKE_PLAYWRIGHT_SERVER], env=None,
+    )
+    session_ids = []
+
+    async def factory(stack: AsyncExitStack):
+        read, write, get_id = await stack.enter_async_context(streamablehttp_client(server.url))
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        session_ids.append(get_id())
+        return session
+
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    navigate = MCPTool(
+        name="browser_navigate", description="navigate", parameters={},
+        session=None, server_name="playwright", session_lease=pool.lease,
+    )
+
+    async def call_as(key, url):
+        token = set_browser_session_key(key)
+        try:
+            return await navigate.execute(url=url)
+        finally:
+            reset_browser_session_key(token)
+
+    try:
+        await server.start(30)
+        assert (await call_as("A", "https://a/")).success
+        before_b = await call_as("B", "https://b/")
+        assert before_b.success
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(server.url, headers={"mcp-session-id": session_ids[0]})
+            response.raise_for_status()
+        failed = await call_as("A", "https://must-not-replay/")
+        assert not failed.success and "BROWSER_SESSION_RESET" in failed.error
+        assert pool.active_keys() == ["B"]
+        assert len(session_ids) == 2, "failed action must not create a replacement client"
+        after_b = await call_as("B", "https://b/still-alive")
+        assert after_b.success and _ctx_of(after_b.content) == _ctx_of(before_b.content)
+        assert (await call_as("A", "https://a/recovered")).success
+        assert len(session_ids) == 3 and session_ids[2] != session_ids[0]
+    finally:
+        await pool.close_all(final=True)
+        await server.stop()
+
+
 async def test_stdio_http_connect_failure_leaves_no_orphan_process():
     conn = MCPServerConnection(
         name="playwright",

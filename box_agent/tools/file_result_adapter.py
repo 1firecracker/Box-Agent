@@ -246,6 +246,10 @@ def _repeatable_framework_error(
         return f"{tool_name}:{visible_error}", code
     if visible_error.startswith("INTERNAL_MODEL_HISTORY_PLACEHOLDER:"):
         return f"{tool_name}:{visible_error}", "INTERNAL_MODEL_HISTORY_PLACEHOLDER"
+    for code in ("CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"):
+        if visible_error.startswith(f"{code}:"):
+            # Changing the shell spelling or tool does not change the policy.
+            return code, code
     return None
 
 

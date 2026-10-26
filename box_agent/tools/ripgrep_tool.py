@@ -306,7 +306,9 @@ class _RipgrepTool(Tool):
                 success=False,
                 error=(
                     "BROAD_HOME_SEARCH_BLOCKED: Recursive search from the entire user "
-                    "home is not allowed. Choose a more specific directory."
+                    "home is not allowed. Do not retry the same scope with another tool. "
+                    "Use the project directory or the location named by the user "
+                    "(for example ~/Desktop); ask for the location only if it is unknown."
                 ),
             )
         if self._is_git_metadata(search_path):
