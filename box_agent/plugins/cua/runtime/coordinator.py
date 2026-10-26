@@ -10,7 +10,7 @@ from typing import Any, Callable
 class SerialCoordinator:
     """One worker owns calls, invalidation and cleanup for one CUA service.
 
-    Cancelling a queued future removes that call. Cancelling a running call
+    Cancelling a queued request removes that call. Cancelling a running call
     cannot stop desktop effects; the worker retains ownership until it settles.
     Its observations are invalidated before another call can use them. This
     serializes this service only, not other Driver clients or the real user.
@@ -26,6 +26,8 @@ class SerialCoordinator:
         self._pending: set[Future] = set()
         self._pending_lock = threading.Lock()
         self._close_future: Future | None = None
+        self._admission = asyncio.Lock()
+        self._waiting: set[asyncio.Task] = set()
 
     def _recover(self) -> None:
         if self._abandoned.is_set():
@@ -51,6 +53,38 @@ class SerialCoordinator:
     async def call(self, name: str, arguments: dict[str, Any]) -> Any:
         if self._close_future is not None:
             raise RuntimeError("CUA coordinator is closing")
+        # Only the event-loop owner may hand off to the next request. Otherwise
+        # the worker can start queued input before CancelledError is observed.
+        task = asyncio.current_task()
+        self._waiting.add(task)
+        try:
+            await self._admission.acquire()
+        finally:
+            self._waiting.discard(task)
+        release = True
+        try:
+            return await self._dispatch(name, arguments)
+        except asyncio.CancelledError:
+            # Queue recovery after any in-flight call. Keep admission
+            # until that recovery (or shutdown) finishes, without delaying the
+            # cancelled caller's return.
+            release = False
+            loop = asyncio.get_running_loop()
+            recovery = self._close_future or self._pool.submit(self._recover)
+
+            def recovered(_done):
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(self._admission.release)
+
+            recovery.add_done_callback(recovered)
+            raise
+        finally:
+            if release:
+                self._admission.release()
+
+    async def _dispatch(self, name: str, arguments: dict[str, Any]) -> Any:
+        if self._close_future is not None:
+            raise RuntimeError("CUA coordinator is closing")
         future = self._pool.submit(self._execute, name, arguments)
         with self._pending_lock:
             self._pending.add(future)
@@ -68,6 +102,8 @@ class SerialCoordinator:
 
     def _begin_close(self) -> Future:
         if self._close_future is None:
+            for waiter in tuple(self._waiting):
+                waiter.cancel()
             with self._pending_lock:
                 pending = list(self._pending)
             for future in pending:

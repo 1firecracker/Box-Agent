@@ -50,6 +50,8 @@ helper 由捆绑 Swift 源码通过 `xcrun swiftc` 编译，按源码哈希和�
 
 `SerialCoordinator` 串行执行一个服务的请求。排队请求取消后撤回；在途请求取消后，worker 等待后端结束，释放 lease、使观察失效，再处理下一次请求。取消不撤销已发生的桌面操作。共享 MCP loader 继续使用主分支的连接生命周期管理。
 
+下一项请求由事件循环在当前调用的完成／取消处理之后放行，再提交给 worker。即使底层调用先结束、取消协程稍后才恢复，已排队输入也会等待取消清理；取消调用方可以立即返回，清理完成前继续持有执行所有权。关闭服务时撤回尚在等待放行的请求。
+
 结果保留 `request_id`、`output`、`backend_events`、`adapter_context`、`error_category`、`requires_requery`。图片通过 MCP image block 返回，继续由已有 CUA 图片插件处理。截图归档绝对路径修复单独见 [PR #220](https://github.com/Raccoon-Office/Box-Agent/pull/220)。
 
 ## 使用文档与验证

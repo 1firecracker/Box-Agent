@@ -263,7 +263,8 @@ async def test_mcp_session_roundtrip_preserves_grounding_and_closes_owned_backen
 
 
 @pytest.mark.asyncio
-async def test_mcp_cancellation_requires_requery_before_another_write(service):
+@pytest.mark.parametrize('worker_finishes_first', [False, True])
+async def test_mcp_cancellation_requires_requery_before_another_write(service, worker_finishes_first):
     from mcp.types import CallToolRequest, CallToolRequestParams
     ok(service, 'get_app', app='TextEdit')
     driver = service.drivers[0]
@@ -286,12 +287,17 @@ async def test_mcp_cancellation_requires_requery_before_another_write(service):
     try:
         first = asyncio.create_task(handler(request('type_text', text='one')))
         assert await asyncio.to_thread(entered.wait, 2)
-        first.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first
         second = asyncio.create_task(handler(request('press_key', key='Return')))
         await asyncio.sleep(0)
-        assert not second.done()
+        first.cancel()
+        if worker_finishes_first:
+            release.set()
+            # Drain the worker while the cancelled coroutine cannot yet resume.
+            owner._pool.submit(lambda: None).result(timeout=2)
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        if not worker_finishes_first:
+            assert not second.done()
         release.set()
         rejected = (await asyncio.wait_for(second, 2)).root
         assert rejected.isError and 'RequiresRequery' in rejected.content[0].text
