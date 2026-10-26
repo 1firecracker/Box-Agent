@@ -7,7 +7,7 @@ background-first delivery and its native helpers. Window and sheet identity
 checks are retained. Input is background-first using the 0.34 delivery contract;
 file-panel shortcuts use an optional native helper for remote-process routing.
 explicit background refusals retry once through the original explicit-focus
-foreground path. Keyboard fallback retains desktop delivery. Desktop-coordinate
+foreground path. Untargeted keyboard fallback retains desktop delivery. Desktop-coordinate
 fallback and drag retain foreground delivery. Older geometry adaptations
 are marked ``0.32:``.
 """
@@ -1633,7 +1633,8 @@ class Adapter:
                             if indexed and not pixel_fallback else active_window)
             corrected = self.focus_window(
                 state, focus_target,
-                (indexed and not pixel_fallback) or method in {'pressKey', 'typeText', 'paste'},
+                not targeted_input and ((indexed and not pixel_fallback)
+                                        or method in {'pressKey', 'typeText', 'paste'}),
                 keyboard=method in {'pressKey', 'typeText', 'paste'}, observation_fresh=True, activate=True)
             if corrected['window_id'] != focus_target['window_id']:
                 active_window = corrected
@@ -1652,7 +1653,10 @@ class Adapter:
                               'delivery_mode': 'background'}
                     identity = {'pid': state['pid'], 'window_id': active_window['window_id']}
             check_windows()
-            if method in {'pressKey', 'paste'}:
+            # Explicit fields keep their snapshot token, PID and source window;
+            # Driver resolves/focuses that field and rejects stale identities.
+            # Desktop keys are reserved for unaddressed keyboard input.
+            if method in {'pressKey', 'paste'} and not targeted_input:
                 chord = ['cmd', 'v'] if method == 'paste' else keys
                 return self.call('hotkey' if len(chord) > 1 else 'press_key', {
                     'scope': 'desktop', **({'keys': chord} if len(chord) > 1 else {'key': chord[0]})})

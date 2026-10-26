@@ -1426,3 +1426,61 @@ def test_input_reuses_app_inventory_within_action_but_detects_restarted_app_next
     with pytest.raises(ValueError, match='ApplicationChanged'):
         api.control(method, 'app', args)
     assert [name for name, _ in driver.calls] == ['list_apps']
+
+
+@pytest.mark.parametrize('method,args', [('pressKey', {'key': 'delete'}), ('paste', {'text': 'draft'}), ('typeText', {'text': 'draft'})])
+@pytest.mark.parametrize('route', ['explicit', 'fallback'])
+def test_explicit_input_target_never_corrects_to_another_window(monkeypatch, method, args, route):
+    driver = FakeDriver()
+    api = adapter.Adapter(driver)
+    api.handles['app'] = state = {'pid': 42}
+    api.observe(state, 'getAXState')
+    window = driver.responses['list_windows']['structuredContent']['windows'][0]
+    driver.responses['list_windows']['structuredContent']['windows'].append({**window, 'window_id': 8})
+    state['focus_hint'] = {'window_id': 7, 'frames': [api.frame(w) for w in driver.responses['list_windows']['structuredContent']['windows']]}
+    original = driver.call
+    def call(name, values):
+        response = original(name, values)
+        if name in {'press_key', 'type_text'} and values.get('delivery_mode') == 'background':
+            return {'isError': True, **result(code='background_unavailable', effect='not_sent')}
+        if name == 'bring_to_front' and values['window_id'] == 7:
+            return result(code='bring_to_front_exact_window_unverified', pid=42, window_id=7,
+                          observed={'focused_window_id': 8, 'front_process_matches_target': True,
+                                    'frontmost_pid': 42, 'workspace_frontmost_pid': 42,
+                                    'frontmost_ordinary_window_id': 8})
+        return response
+    monkeypatch.setattr(driver, 'call', call)
+    with pytest.raises((ValueError, adapter.ActionError), match='focus|Window|unverified'):
+        api.control(method, 'app', {**args, 'target': 0, **({'deliveryMode': 'foreground'} if route == 'explicit' else {})})
+    assert [p['window_id'] for n, p in driver.calls if n == 'bring_to_front'] == [7]
+    assert not any(p.get('scope') == 'desktop' or p.get('delivery_mode') == 'foreground'
+                   for n, p in driver.calls if n in {'press_key', 'hotkey', 'type_text'})
+
+
+@pytest.mark.parametrize('method,args', [('pressKey', {'key': 'cmd+a'}), ('paste', {'text': 'draft'}), ('typeText', {'text': 'draft'})])
+@pytest.mark.parametrize('route', ['explicit', 'fallback'])
+@pytest.mark.parametrize('stale', [False, True])
+def test_foreground_input_keeps_original_field_token(monkeypatch, method, args, route, stale):
+    driver = FakeDriver()
+    api = adapter.Adapter(driver)
+    api.handles['app'] = state = {'pid': 42}
+    api.observe(state, 'getAXState')
+    original = driver.call
+    def call(name, values):
+        response = original(name, values)
+        if name in {'press_key', 'type_text'} and values.get('delivery_mode') == 'background':
+            return {'isError': True, **result(code='background_unavailable', effect='not_sent')}
+        if name in {'press_key', 'type_text'} and values.get('element_token') and stale:
+            return {'isError': True, **result(code='stale_element_token', effect='not_sent')}
+        return response
+    monkeypatch.setattr(driver, 'call', call)
+    request = {**args, 'target': 0, **({'deliveryMode': 'foreground'} if route == 'explicit' else {})}
+    if stale:
+        with pytest.raises(adapter.ActionError):
+            api.control(method, 'app', request)
+    else:
+        api.control(method, 'app', request)
+    inputs = [p for n, p in driver.calls if n in {'press_key', 'hotkey', 'type_text'}]
+    assert inputs
+    assert all(p.get('pid') == 42 and p.get('window_id') == 7 and p.get('element_token') == 's1:1' for p in inputs)
+    assert inputs[-1]['delivery_mode'] == 'foreground'
