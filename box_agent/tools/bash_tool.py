@@ -158,7 +158,7 @@ def _query_exit_outcome(command: str, exit_code: int, stderr: str) -> str | None
     """
     if exit_code != 1 or stderr:
         return None
-    inspected = inspect_shell_command(command, posix=True)
+    inspected = inspect_shell_command(command.strip(), posix=True)
     if (
         inspected.has_control_operators
         or inspected.substitutions

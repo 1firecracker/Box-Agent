@@ -248,8 +248,9 @@ def _repeatable_framework_error(
         return f"{tool_name}:{visible_error}", "INTERNAL_MODEL_HISTORY_PLACEHOLDER"
     for code in ("CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"):
         if visible_error.startswith(f"{code}:"):
-            # Changing the shell spelling or tool does not change the policy.
-            return code, code
+            # Different causes and targets can share one policy code. Collapse
+            # only the same diagnostic, even when retried through another tool.
+            return visible_error, code
     return None
 
 

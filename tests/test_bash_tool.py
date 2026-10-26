@@ -40,6 +40,7 @@ from box_agent.tools.pptx_safety import (
     "cd missing && grep x a", "env grep x a", "! grep x a", "grep x a 2>/dev/null",
     "grep $(false) a", "grep `false` a", "grep x <(false)", "bash -c 'grep x a'",
     "grep () { return 1; }; grep x a", "$QUERY x a", "grep x a; exit 1",
+    "\ngrep x a\nfalse\n", "\ndiff a b | cat\n",
 ])
 def test_query_exit_does_not_reclassify_ambiguous_or_unrelated_failure(command):
     assert _query_exit_outcome(command, 1, "") is None
@@ -49,7 +50,9 @@ def test_query_exit_does_not_reclassify_ambiguous_or_unrelated_failure(command):
     ("grep 'a|b' a.txt", "no_matches"), ("rg 'a;b' a.txt", "no_matches"),
     ("diff a.txt b.txt", "differences"),
 ])
-def test_query_exit_recognizes_only_normal_exit_one(command, outcome):
+@pytest.mark.parametrize("padding", ["", "\n", " \n\t"])
+def test_query_exit_recognizes_only_normal_exit_one(command, outcome, padding):
+    command = f"{padding}{command}{padding}"
     assert _query_exit_outcome(command, 1, "") == outcome
     assert _query_exit_outcome(command, 2, "") is None
     assert _query_exit_outcome(command, 1, "read error") is None
@@ -59,8 +62,11 @@ def test_query_exit_recognizes_only_normal_exit_one(command, outcome):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("command", "exit_code", "success", "outcome"), [
     ("grep absent a.txt", 1, True, "no_matches"),
+    ("grep absent a.txt\n", 1, True, "no_matches"),
+    ("\ngrep absent a.txt", 1, True, "no_matches"),
     ("grep -c absent a.txt", 1, True, "no_matches"),
     ("diff a.txt b.txt", 1, True, "differences"),
+    ("\ndiff a.txt b.txt\n", 1, True, "differences"),
     ("grep alpha a.txt", 0, True, None),
     ("diff a.txt a.txt", 0, True, None),
     ("grep x missing.txt", 2, False, None),
