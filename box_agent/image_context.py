@@ -158,13 +158,15 @@ class ImageContext:
         excluded: list[dict[str, Any]] = []
         # A separate text-only summary model must not retire images that are
         # still usable by the main model. Its summary simply omits the pixels.
-        skip_images = purpose == "summary" and image_input_support(llm) is not True
+        image_support = image_input_support(llm)
+        skip_images = purpose == "summary" and image_support is not True
         for ref in candidates:
             if skip_images:
                 excluded.append({"imageId": ref["imageId"], "reason": "summary_model_without_vision"})
                 continue
-            if image_input_support(llm) is False:
-                evict(ref, "model_does_not_support_images")
+            if image_support is not True:
+                evict(ref, "model_does_not_support_images" if image_support is False
+                      else "model_image_support_unknown")
                 continue
             try:
                 block = self.store.load_block(ref)
