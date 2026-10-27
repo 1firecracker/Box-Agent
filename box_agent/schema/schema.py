@@ -75,6 +75,8 @@ class TokenUsage(BaseModel):
     # payload (prompt/completion/total) stable for hosts and trace consumers.
     input_tokens: int = Field(default=0, exclude=True)
     output_tokens: int = Field(default=0, exclude=True)
+    # Optional provider detail for diagnostics; already included in completion_tokens.
+    reasoning_tokens: int | None = Field(default=None, ge=0, exclude=True)
     cache_creation_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens_reported: bool = Field(default=False, exclude=True)

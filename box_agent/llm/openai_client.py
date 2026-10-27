@@ -497,12 +497,22 @@ def _token_usage_from_openai(provider_usage: Any) -> TokenUsage:
         and 0 <= cached_tokens <= prompt_tokens
     )
     cached_tokens = cached_tokens if cache_reported else 0
+    reasoning_tokens = _get_field(
+        _get_field(provider_usage, "completion_tokens_details"), "reasoning_tokens"
+    )
+    if (
+        not isinstance(reasoning_tokens, int)
+        or isinstance(reasoning_tokens, bool)
+        or reasoning_tokens < 0
+    ):
+        reasoning_tokens = None
     return TokenUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=_get_field(provider_usage, "completion_tokens") or 0,
         total_tokens=_get_field(provider_usage, "total_tokens") or 0,
         input_tokens=prompt_tokens - cached_tokens,
         output_tokens=_get_field(provider_usage, "completion_tokens") or 0,
+        reasoning_tokens=reasoning_tokens,
         cache_read_input_tokens=cached_tokens,
         cache_read_input_tokens_reported=cache_reported,
     )
