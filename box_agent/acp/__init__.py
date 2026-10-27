@@ -72,7 +72,7 @@ from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.acp.message_display import MessageDisplay
-from box_agent.injections import InjectionManager
+from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -1039,6 +1039,7 @@ class SessionState(AgentSession):
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
     inject_queue: InjectionManager = field(default_factory=InjectionManager)
+    wrap_up_requested: bool = False
     connector_skill_grants: set[str] = field(default_factory=set)
     selected_connector_ids: set[str] = field(default_factory=set)
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None
@@ -2738,6 +2739,7 @@ class BoxACPAgent:
             pending_suggestions.cancel()
         state.follow_up_suggestions_task = None
         state.cancelled = False
+        state.wrap_up_requested = False
         prompt_images = _prompt_image_blocks(params.prompt)
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
         # Judge the language on the user's own words, before host prefixes are added.
@@ -3244,6 +3246,7 @@ class BoxACPAgent:
                 )
                 while (
                     auto_enabled
+                    and not state.wrap_up_requested
                     and state.pending_plan_approval is None
                     and should_continue_goal_autopilot(state.agent, stop_reason)
                 ):
@@ -3371,11 +3374,18 @@ class BoxACPAgent:
             reset_token_meter(meter_token)
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
         state.waiting_for_user_input = waiting_for_user
+        wrap_up_incomplete = bool(
+            state.wrap_up_requested
+            and state.agent.goal is not None
+            and state.agent.goal.status != "complete"
+        )
         execution_status = (
             "waiting_for_user"
             if waiting_for_user
             else "error"
             if stop_reason in {StopReason.ERROR.value, StopReason.INTERRUPTED.value}
+            else "incomplete"
+            if wrap_up_incomplete
             else "completed"
         )
         try:
@@ -3454,6 +3464,8 @@ class BoxACPAgent:
             stop_reason in {StopReason.ERROR.value, StopReason.INTERRUPTED.value}
             or bool(state.task_registry_error)
         )
+        if wrap_up_incomplete and stop_reason == StopReason.END_TURN.value:
+            acp_stop_reason = "max_turn_requests"
         # ACP has no generic error stop reason. Keep stopReason protocol-valid
         # and expose the internal outcome in stable response metadata instead.
         response_meta: dict[str, Any] = {
@@ -3474,11 +3486,14 @@ class BoxACPAgent:
                 if waiting_for_user
                 else "error"
                 if failed
+                else "incomplete"
+                if wrap_up_incomplete
                 else "completed"
             ),
             "completed": (
                 not failed
                 and not waiting_for_user
+                and not wrap_up_incomplete
             ),
             "paused": False,
             "usage": {
@@ -3503,9 +3518,12 @@ class BoxACPAgent:
                 and stop_reason == StopReason.END_TURN.value
                 and not autopilot.budget_exhausted
                 and not autopilot.no_progress_exhausted
+                and not wrap_up_incomplete
             ),
             duration_ms=duration_ms,
         )
+        if state.wrap_up_requested:
+            response_meta["wrapUp"] = {"requested": True, "goalIncomplete": wrap_up_incomplete}
         if state.agent.goal is not None or autopilot.continuations > 0:
             response_meta["goalAutopilot"] = {
                 "enabled": auto_enabled,
@@ -3632,6 +3650,40 @@ class BoxACPAgent:
 
     async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method == "request_wrap_up":
+            state = self._sessions.get(params.get("sessionId", ""))
+            if state is None:
+                return {"error": "session_not_found"}
+            if not state.turn_active or state.cancelled:
+                return {"error": "no_active_turn"}
+            if params.get("turnId") and params["turnId"] != state.current_turn_id:
+                return {"error": "turn_mismatch"}
+            remaining = params.get("remainingSeconds")
+            if (
+                isinstance(remaining, bool)
+                or not isinstance(remaining, int)
+                or not 0 < remaining <= 10800
+            ):
+                return {"error": "invalid_remaining_seconds"}
+            if state.wrap_up_requested:
+                return {"ok": True, "deduplicated": True}
+            state.wrap_up_requested = True
+            state.inject_queue.submit(MessageInjection(
+                InjectionKind.BUDGET,
+                f"The host execution time budget has about {remaining} seconds remaining. "
+                "Begin wrapping up the current task now. Do not expand scope or start new research. "
+                "Use the remaining time for necessary saves/exports and bounded verification "
+                "against the user's requirements, pending work, and expected deliverables. "
+                "Check that produced files exist and are usable when applicable; retain existing "
+                "workflow quality gates. Report what is completed and verified, file locations, "
+                "unchecked or unfinished items, and a concrete continuation point. "
+                "Do not claim success solely because a file was created or time is running out. "
+                "Do not mark an unfinished goal complete. Finish with a concise final response "
+                "in the user's language before the deadline; no automatic goal continuation "
+                "will follow this run.",
+                injection_id=f"wrap-up:{uuid4()}",
+            ))
+            return {"ok": True}
         if method == "inject":
             session_id = params.get("sessionId", "")
             text = params.get("text", "")
@@ -5277,6 +5329,7 @@ class BoxACPAgent:
                             suggestions = getattr(llm, "follow_up_suggestions", [])
                             if (
                                 state.follow_up_suggestions_enabled
+                                and not state.wrap_up_requested
                                 and reason == StopReason.END_TURN
                                 and state.pending_plan_approval is None
                                 and (state.agent.goal is None or state.agent.goal.status != "active")

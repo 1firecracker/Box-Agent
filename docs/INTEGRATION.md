@@ -30,6 +30,26 @@ wire 格式，但底层共享 core/tool 行为仍可能一致。
 
 ## 典型对接场景
 
+### 运行时限前收尾
+
+宿主可在当前 `session/prompt` 尚未结束时调用 `_request_wrap_up`：
+参数为 `sessionId`、`remainingSeconds`（1–10800 的整数），以及可选的
+`turnId`（必须与当前轮一致）。返回 `ok: true` 表示系统预算提醒已入队，
+重复请求返回 `deduplicated: true`；不表示模型已收到或任务已完成。
+提醒在下一安全边界进入模型上下文，不作为用户消息回显。它要求保存/导出、
+在剩余预算内核验需求与交付物、列出未完成项，不绕过既有质量门。
+本轮结束后不再自动续跑 Goal；下一次用户请求恢复正常策略。
+
+最终回包可包含 `_meta.wrapUp: {requested: true, goalIncomplete: boolean}`。
+未完成的 Goal 保留原状态，`completed` 为 false，正常收尾的 `runStatus`
+为 `incomplete`，`stopReason` 为 `max_turn_requests`；宿主不能当作任务成功。
+没有 Goal 时仍沿用原有完成与交付检查，预算提醒本身不是验收证明。
+
+硬截止仍由宿主计时并发送 `session/cancel`，保留原请求等待取消清理后的回包。
+宽限期内正常完成的回包应走原有交付校验；宽限期耗尽才能按原有恢复机制处理，
+未确认进程退出前不能向用户宣称已安全停止。旧 runtime 不支持此扩展时，
+宿主应继续执行取消/恢复流程，不把提醒降级成伪造的用户输入。
+
 ### 查询结果与可恢复的工具拦截
 
 单条、无包装和控制语法的 POSIX `grep` / `rg` 无匹配以及 `diff` 有差异（结构识别忽略首尾空白），
