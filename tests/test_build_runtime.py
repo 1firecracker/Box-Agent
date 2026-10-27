@@ -166,6 +166,16 @@ def test_verify_entry_binary_arch_accepts_linux_x64(
     build_runtime.verify_entry_binary_arch(entry, plat="linux", arch="x64")
 
 
+@pytest.mark.parametrize("external_python_sandbox", [False, True])
+def test_runtime_includes_proactive_prompt_resources(external_python_sandbox: bool) -> None:
+    collect = build_runtime.pyinstaller_collect_args(
+        external_python_sandbox=external_python_sandbox
+    )
+    assert ("--collect-data", "box_agent.plugins.proactive") in list(
+        zip(collect[0::2], collect[1::2])
+    )
+
+
 def test_pyinstaller_args_keep_bundled_sandbox_by_default() -> None:
     hidden = build_runtime.pyinstaller_hidden_imports()
     collect = build_runtime.pyinstaller_collect_args()

@@ -56,6 +56,32 @@ wire contract:
 - [User Decision protocol](USER_DECISION_PROTOCOL.md) / [用户决策协议](USER_DECISION_PROTOCOL_CN.md):
   public Skill decision cards, runtime-bounded defaults, and same-session resume.
 
+## Proactive ACP plugin
+
+The optional `box_agent.plugins.proactive` plugin uses the existing MemSense
+backend and a compatible ACP host. Enable it alongside the settings in
+[Memory Integration](MEMORY_INTEGRATION.md):
+
+```yaml
+plugins:
+  proactive:
+    enabled: true
+```
+
+The host advertises `proactive_reminders`, `proactive_agent`, `proactive_watches`
+and/or `proactive_actions` in session `host_capabilities`, using version `1` for
+each supported extension. Post-turn processing requires a complete successful
+answer; reminders count as delivered only after the host acknowledges persistence.
+The host owns scheduling, confirmation, message history and execution in the
+original session. Enabling this plugin does not add a CLI timer or update an
+installed desktop client. Scheduled checks are read-only and use a headless
+browser; suggestions execute only after user acceptance through the host.
+Long scheduled reminder previews use an explicit ellipsis at the existing
+100 UTF-16-unit host limit; evidence and execution instructions remain intact.
+`proactive_memory_read` reads historical MemSense evidence in Proactive sessions
+using that session's existing identity. Ordinary `memory_read` retains the
+upstream core-file restrictions; no shared memory or kernel code is changed.
+
 ## Documentation maintenance
 
 - Verify behavior against current source and focused tests; the

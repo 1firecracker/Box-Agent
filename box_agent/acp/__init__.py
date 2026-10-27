@@ -73,10 +73,10 @@ from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
-from box_agent.session_context import HostBindings, SessionOptions
+from box_agent.session_context import SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
-from box_agent.session_assembly import create_application_runtime
 from box_agent.agent_service import AgentService
+from box_agent.acp.background_notifications import proactive
 from box_agent.agent_runtime import (
     build_agent,
     build_llm_client,
@@ -1276,7 +1276,7 @@ class BoxACPAgent:
         lite_llm: LLMClient | None = None,
     ):
         self._conn = conn
-        self._plugin_runtime = create_application_runtime()
+        self._plugin_runtime = proactive.create_proactive_runtime()
         self._config = config
         self._llm = llm
         self._default_llm_binding: dict[str, Any] | None = None
@@ -2107,6 +2107,8 @@ class BoxACPAgent:
                     )
                 )
 
+        tools.extend(proactive.session_tools(self._conn, session_id, meta, self._config, utility=utility))
+
         recovery_prompt: str | None = None
         session_log: SessionLog | None = None
         session_projection = None
@@ -2203,8 +2205,9 @@ class BoxACPAgent:
                     process_owner_id=session_id,
                     workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
                     follow_up_suggestions_enabled=follow_up_suggestions_enabled,
+                    state=proactive.session_state(meta),
                 ),
-                host=HostBindings(
+                host=proactive.ProactiveHostBindings(
                     llm_client=session_llm, summary_llm=summary_llm,
                     base_tools=self._base_tools, system_prompt=self._system_prompt,
                     memory_manager=self._memory, hooks=self._hooks,
@@ -2225,6 +2228,7 @@ class BoxACPAgent:
                     ) if part) or None,
                     output=lambda msg: sys.stderr.write(msg + "\n"),
                     diagnostics=emit_diagnostic,
+                    publish_notification=proactive.notification_publisher(self._conn, session_id, meta),
                 ),
                 agent_factory=Agent,
                 session_projection=session_projection,
@@ -2645,6 +2649,7 @@ class BoxACPAgent:
                     "prompt_fingerprint": prompt_fingerprint(params.prompt),
                 })
                 log_store.flush()
+            proactive.ProactiveLifecycle.user_input_started(state)
             return await self._prompt_for_session(params, session_id, state)
         except Exception as exc:
             if edit is not None:
@@ -3229,7 +3234,10 @@ class BoxACPAgent:
             no_progress_limit=state.config.agent.goal_autopilot_no_progress_turns,
         )
         try:
-            async with memory_user_turn(
+            async with proactive.ProactiveLifecycle.user_turn(
+                state, user=plan_detection_text,
+                session_id=state.upstream_session_id or session_id, turn_id=turn_id,
+            ) as completed_turn, memory_user_turn(
                 state, user_text=plan_detection_text,
                 session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
@@ -3248,6 +3256,7 @@ class BoxACPAgent:
                     explicitly_selected_skill_names=explicitly_selected_skill_names,
                     ui_language=ui_language,
                     clear_prompt_grants=False,
+                    completed_turn=completed_turn,
                 )
                 while (
                     auto_enabled
@@ -3283,6 +3292,7 @@ class BoxACPAgent:
                         auto_approve_plan=auto_approve_plan,
                         plan_start_text=plan_detection_text,
                         clear_prompt_grants=False,
+                        completed_turn=completed_turn,
                     )
                     after_signature = goal_autopilot_progress_signature(state.agent.goal)
                     if should_continue_goal_autopilot(state.agent, stop_reason):
@@ -3566,6 +3576,7 @@ class BoxACPAgent:
                     turn_id=state.current_turn_id,
                 )
             state.request_cancel()
+            proactive.ProactiveLifecycle.user_input_started(state)
             pending_suggestions = state.follow_up_suggestions_task
             if pending_suggestions is not None and not pending_suggestions.done():
                 pending_suggestions.cancel()
@@ -4466,6 +4477,7 @@ class BoxACPAgent:
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
         message_display: MessageDisplay | None = None,
+        completed_turn: proactive.UserTurnResult | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         message_display = message_display or MessageDisplay()
@@ -5508,6 +5520,8 @@ class BoxACPAgent:
         # when the host closes after DoneEvent. Its final result may have been
         # replaced by a cleanup failure after the terminal event was published.
         result = await protocol_handle.result()
+        if completed_turn is not None:
+            completed_turn.result = result
         if result.status is RunStatus.FAILED:
             state.last_error = str(
                 (result.error or {}).get("message")

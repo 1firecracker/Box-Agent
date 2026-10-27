@@ -267,6 +267,7 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
 def pyinstaller_collect_args(*, external_python_sandbox: bool = False) -> list[str]:
     """Return flattened PyInstaller collect args for the ACP runtime build."""
     collect_groups = [
+        ("--collect-data", "box_agent.plugins.proactive"),
         ("--collect-all", "tiktoken"),
         ("--collect-all", "tiktoken_ext"),
         ("--collect-all", "jupyter_client"),
