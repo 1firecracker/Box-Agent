@@ -187,12 +187,10 @@ from box_agent.session_trace import (
     SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
     set_session_trace_writer,
 )
-from box_agent.session_log import SessionLog
+from box_agent.session_log import SessionLog, run_session_io
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
-from box_agent.session_history import (
-    current_revision, prompt_fingerprint, revision_request, revise_agent_history,
-)
+from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -2111,6 +2109,7 @@ class BoxACPAgent:
 
         recovery_prompt: str | None = None
         session_log: SessionLog | None = None
+        session_projection = None
         session_log_restored = False
         if upstream_session_id:
             for existing_handle, existing_state in list(self._sessions.items()):
@@ -2135,31 +2134,39 @@ class BoxACPAgent:
                         error=str(browser_error),
                     )
             session_root = state_path('sessions')
-            try:
-                session_log = SessionLog.open(
-                    session_root,
-                    session_id=upstream_session_id,
-                    cwd=workspace,
-                    recover=True,
-                )
-            except FileNotFoundError:
-                session_log = SessionLog.create(
-                    session_root,
-                    session_id=upstream_session_id,
-                    cwd=workspace,
-                )
-            else:
+
+            def open_log():
+                # Retain ownership even if cancellation arrives before the
+                # worker's result is delivered to this coroutine.
+                nonlocal session_log
                 try:
+                    session_log, projection = SessionLog.open_with_projection(
+                        session_root, session_id=upstream_session_id,
+                        cwd=workspace, recover=True,
+                    )
+                except FileNotFoundError:
+                    session_log = SessionLog.create(
+                        session_root, session_id=upstream_session_id, cwd=workspace,
+                    )
+                    return session_log.replay(), False
+                return projection, True
+
+            try:
+                session_projection, resumed = await run_session_io(open_log)
+                if resumed:
                     # Validate Skill sources before resume repair appends records.
-                    projection = session_log.replay()
                     restore_loader = (session_skill_loader if session_skill_loader is not None
                                       else AgentService.resolve_skill_loader(self._base_tools))
-                    await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(projection.skills)
-                    session_log_restored = bool(projection.messages)
-                    session_log.prepare_resume()
-                except BaseException:
+                    await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(session_projection.skills)
+                    session_log_restored = session_projection.has_messages
+                    session_projection = await run_session_io(
+                        lambda: session_log.prepare_resume_projection(session_projection)
+                    )
+            except BaseException:
+                if session_log is not None:
                     session_log.close()
-                    raise
+                raise
+            if resumed:
                 if session_log.recovery_source is not None:
                     recovery_prompt = (
                         "\n\nThe previous session runtime log could not be fully restored. "
@@ -2220,6 +2227,7 @@ class BoxACPAgent:
                     diagnostics=emit_diagnostic,
                 ),
                 agent_factory=Agent,
+                session_projection=session_projection,
                 allowed_connector_ids_provider=lambda: _connected_connector_ids(
                     selected_connector_ids
                 ),
@@ -2342,7 +2350,7 @@ class BoxACPAgent:
             "history_revision_versions": [1],
             "managed_mcp_config_versions": [1],
         }
-        response_meta["history_revision_id"] = current_revision(list(session_log.events)) if session_log else "initial"
+        response_meta["history_revision_id"] = session_log.current_revision() if session_log else "initial"
         if skillhub_search_enabled:
             response_meta["capabilities"]["skillhub_search_versions"] = [
                 SKILLHUB_SEARCH_CAPABILITY_VERSION
@@ -2612,7 +2620,7 @@ class BoxACPAgent:
                 history = state.agent.session_log
                 raise RequestError(-32011, str(exc), {
                     "code": str(exc),
-                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                    "history_revision_id": history.current_revision() if history else "initial",
                 }) from exc
         elif state._history_restore_failed:
             raise ValueError("HISTORY_RESTORE_REQUIRED")
@@ -2630,8 +2638,7 @@ class BoxACPAgent:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
             if log_store is not None and turn_id:
-                if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-                       for event in log_store.events):
+                if log_store.has_turn_binding(turn_id):
                     raise ValueError("TURN_ALREADY_ACCEPTED")
                 log_store.append("turn/binding", {
                     "turn_id": turn_id,
@@ -2644,7 +2651,7 @@ class BoxACPAgent:
                 history = state.agent.session_log
                 raise RequestError(-32011, str(exc), {
                     "code": str(exc),
-                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                    "history_revision_id": history.current_revision() if history else "initial",
                 }) from exc
             raise
         finally:
@@ -2668,8 +2675,7 @@ class BoxACPAgent:
                 fingerprint=prompt_fingerprint(params.prompt),
             )
         checked_revision()
-        if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-               for event in log_store.events):
+        if log_store.has_turn_binding(turn_id):
             raise ValueError("TURN_ALREADY_ACCEPTED")
         state._history_edit_in_progress = True
         state._history_cancel_requested = False
@@ -2685,8 +2691,7 @@ class BoxACPAgent:
                     raise ValueError("HISTORY_CANCEL_TIMEOUT") from exc
             if state.turn_active or state.run_handle.is_active:
                 raise ValueError("HISTORY_CANCEL_UNCONFIRMED")
-            if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-                   for event in log_store.events):
+            if log_store.has_turn_binding(turn_id):
                 raise ValueError("TURN_ALREADY_ACCEPTED")
             suggestions = state.follow_up_suggestions_task
             if suggestions is not None and not suggestions.done():
@@ -3509,7 +3514,7 @@ class BoxACPAgent:
         # 只在最外层用户请求结束时发布一次最终回答回执，不在每个内部 DoneEvent 时发布。
         # 自动续跑可能替换阶段性回答，资源清理失败也可能改变最终状态。
         # 因此必须在这些步骤完成后确认；等待审批、失败或预算耗尽都不触发成功折叠。
-        response_meta["history_revision_id"] = current_revision(list(state.agent.session_log.events)) if state.agent.session_log else "initial"
+        response_meta["history_revision_id"] = state.agent.session_log.current_revision() if state.agent.session_log else "initial"
         response_meta["messageDisplay"] = message_display.receipt(
             completed=(
                 not failed

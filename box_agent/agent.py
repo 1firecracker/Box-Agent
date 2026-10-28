@@ -475,6 +475,7 @@ class Agent:
         skill_runtime: SkillRuntime | None = None,
         session_id: str = "",
         image_context: ImageContextConfig | None = None,
+        session_projection: SessionProjection | None = None,
     ):
         self.llm = llm_client
         self.tools = {
@@ -621,7 +622,7 @@ class Agent:
             self.tools["goal_read"] = _GoalReadTool(self)
             self.tools["goal_write"] = _GoalWriteTool(self)
         self.session_log = session_log
-        self.image_context = ImageContext(session_log, image_context)
+        self.image_context = ImageContext(session_log, image_context, restore=False)
         self._pending_skill_restore: list[dict[str, Any]] = []
         self._skill_persistence_pending = False
         self._persisted_active_skill_records: list[dict[str, Any]] = []
@@ -633,7 +634,9 @@ class Agent:
         # nothing to restore here; the caller supplies the live surface
         # directly. Feature-detect so such a Store does not crash construction.
         _replay = getattr(self.session_log, "replay", None)
-        if self.session_log is not None and callable(_replay):
+        if session_projection is not None:
+            self.restore_session_projection(session_projection)
+        elif self.session_log is not None and callable(_replay):
             self.restore_session_projection(_replay())
         else:
             self.restored_skills = []

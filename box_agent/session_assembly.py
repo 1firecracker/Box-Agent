@@ -185,11 +185,16 @@ async def _bind_skill_runtime(resources: SessionResources) -> None:
             allow_partial_restore=options.profile == "acp",
         ))
         if options.resume_session_log:
+            from .session_log import run_session_io
+
             session_log = resources.context.host.session_log
             if session_log is None:
                 raise ValueError("resume_session_log requires a borrowed SessionLog")
-            await runtime.arestore_records(session_log.replay().skills)
-            session_log.prepare_resume()
+            projection = await run_session_io(session_log.replay)
+            await runtime.arestore_records(projection.skills)
+            resources.state["session_projection"] = await run_session_io(
+                lambda: session_log.prepare_resume_projection(projection)
+            )
 
 
 def _accepts_keyword(func: Any, name: str) -> bool:

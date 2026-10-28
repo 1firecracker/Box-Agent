@@ -105,6 +105,7 @@ def build_agent(
     allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
     deferred_mcp_loading_enabled: bool = True,
     session_log: Any = _UNSET,
+    session_projection: Any = _UNSET,
     enable_builtin_tools: bool | object = _UNSET,
     skill_runtime: Any = _UNSET,
     session_id: str | None = None,
@@ -149,6 +150,8 @@ def build_agent(
         kwargs["hooks"] = hooks
     if session_log is not _UNSET:
         kwargs["session_log"] = session_log
+    if session_projection is not _UNSET:
+        kwargs["session_projection"] = session_projection
     if enable_builtin_tools is not _UNSET:
         kwargs["enable_builtin_tools"] = enable_builtin_tools
     if skill_runtime is not _UNSET:

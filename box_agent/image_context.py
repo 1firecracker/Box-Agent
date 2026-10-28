@@ -30,7 +30,10 @@ class ImageProjection:
 
 
 class ImageContext:
-    def __init__(self, session_log: Any = None, config: ImageContextConfig | None = None):
+    def __init__(
+        self, session_log: Any = None, config: ImageContextConfig | None = None,
+        *, restore: bool = True,
+    ):
         self.session_log = session_log
         self.config = config or ImageContextConfig()
         self._temporary = None
@@ -48,7 +51,7 @@ class ImageContext:
         self._notice_ids: list[str] = []
         self._notices: dict[str, str] = {}
         replay = getattr(session_log, "replay", None)
-        if callable(replay):
+        if restore and callable(replay):
             projection = replay()
             self.model_round = getattr(projection, "model_round", 0)
             self.add_references(getattr(projection, "images", []))
