@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +44,9 @@ from .user_paths import state_path
 
 if TYPE_CHECKING:
     from .plugins.builtins import SessionResources
+    from .plugins.descriptors import PluginDescriptor
+    from .plugins.registries import CapabilityBinding
+    from .plugins.runtime import PluginRuntime
 
 
 def _prepared(resources: SessionResources) -> bool:
@@ -885,10 +889,12 @@ def build_acp_session_prompt(
     )
 
 
-def create_application_runtime():
-    """Create the application scope without exposing plugin internals to adapters."""
+def create_application_runtime(
+    *, plugins: Iterable[PluginDescriptor] = (), bindings: Iterable[CapabilityBinding] = (),
+) -> PluginRuntime:
+    """Create the shared application scope with optional capability extensions."""
     from .plugins.runtime import PluginRuntime
-    return PluginRuntime()
+    return PluginRuntime(plugins=plugins, bindings=bindings)
 
 
 def build_session_permission_policy(config, workspace, permission_mode, filesystem_policy):

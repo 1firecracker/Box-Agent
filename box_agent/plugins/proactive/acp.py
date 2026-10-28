@@ -3,15 +3,8 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import plugin_bindings, plugin_descriptors
 from .bindings import ProactiveHostBindings, ProactiveLifecycle, UserTurnResult
-
-
-def create_proactive_runtime():
-    """Compose ACP's optional plugins using the existing runtime extension API."""
-    from . import plugin_bindings, plugin_descriptors
-    from ..runtime import PluginRuntime
-
-    return PluginRuntime(plugins=plugin_descriptors(), bindings=plugin_bindings())
 
 
 def session_state(meta: dict[str, Any]) -> dict[str, Any]:

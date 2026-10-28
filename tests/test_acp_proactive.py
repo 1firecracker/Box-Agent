@@ -31,6 +31,46 @@ class Host:
         return {"status": "persisted", "notificationId": params["notification"]["id"]}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [None, False, True])
+async def test_acp_selects_optional_plugins_through_shared_application_factory(
+    tmp_path, monkeypatch, enabled,
+):
+    import box_agent.acp as acp
+    from box_agent.session_assembly import create_application_runtime
+
+    config = session_config(tmp_path)
+    config.agent.enable_memory = False
+    config.plugins = {} if enabled is None else {"proactive": {"enabled": enabled}}
+    calls = []
+
+    def factory(**extensions):
+        runtime = create_application_runtime(**extensions)
+        calls.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(acp, "create_application_runtime", factory, raising=False)
+    agent = BoxACPAgent(Host(), config, Model(), [], "system")
+    try:
+        assert calls == [agent._plugin_runtime]
+        ids = {p.plugin_id for p in agent._plugin_runtime.host.resolve_dependencies()}
+        proactive_ids = {"session.proactive", "session.proactive_watch", "session.proactive_agent"}
+        assert ids & proactive_ids == (proactive_ids if enabled is True else set())
+        assert "session.resources" in ids
+        if enabled is not True:
+            session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+                "proactive_agent": {"trigger": "turn_completed", "source_session_id": "original"},
+                "proactive_watch_check": {"source_url": "http://shop.test/"},
+            }))
+            state = agent._sessions[session.sessionId]
+            assert not ProactiveLifecycle.turn_observers(state)
+            assert not any(name.startswith("proactive_") for name in state.agent.tools)
+            result = await prompt(agent, session.sessionId, "普通问答", "ordinary-1")
+            assert result.stopReason == "end_turn"
+    finally:
+        await agent.aclose()
+
+
 @pytest.mark.parametrize("enabled,utility", [(False, False), (None, False), (True, True)])
 def test_disabled_and_utility_sessions_do_not_expose_proactive_tools(enabled, utility):
     config = SimpleNamespace(plugins={"proactive": {"enabled": enabled}})

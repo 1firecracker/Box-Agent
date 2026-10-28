@@ -75,6 +75,7 @@ from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
 from box_agent.session_context import SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
+from box_agent.session_assembly import create_application_runtime
 from box_agent.agent_service import AgentService
 from box_agent.acp.background_notifications import proactive
 from box_agent.agent_runtime import (
@@ -1276,7 +1277,12 @@ class BoxACPAgent:
         lite_llm: LLMClient | None = None,
     ):
         self._conn = conn
-        self._plugin_runtime = proactive.create_proactive_runtime()
+        proactive_config = config.plugins.get("proactive")
+        self._proactive_enabled = isinstance(proactive_config, dict) and proactive_config.get("enabled") is True
+        self._plugin_runtime = create_application_runtime(
+            plugins=proactive.plugin_descriptors() if self._proactive_enabled else (),
+            bindings=proactive.plugin_bindings() if self._proactive_enabled else (),
+        )
         self._config = config
         self._llm = llm
         self._default_llm_binding: dict[str, Any] | None = None
@@ -2205,7 +2211,7 @@ class BoxACPAgent:
                     process_owner_id=session_id,
                     workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
                     follow_up_suggestions_enabled=follow_up_suggestions_enabled,
-                    state=proactive.session_state(meta),
+                    state=proactive.session_state(meta) if self._proactive_enabled else {},
                 ),
                 host=proactive.ProactiveHostBindings(
                     llm_client=session_llm, summary_llm=summary_llm,

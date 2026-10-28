@@ -6,6 +6,63 @@ import box_agent.session_assembly as assembly
 from box_agent.config import Config, AgentConfig, LLMConfig, ToolsConfig
 from tests.test_acp import DummyConn, DoneLLM
 
+
+@pytest.mark.asyncio
+async def test_application_factory_without_extensions_preserves_default_catalog():
+    from box_agent.plugins.runtime import PluginRuntime
+
+    runtime = assembly.create_application_runtime()
+    default = PluginRuntime()
+    try:
+        assert [p.plugin_id for p in runtime.host.resolve_dependencies()] == [
+            p.plugin_id for p in default.host.resolve_dependencies()
+        ]
+    finally:
+        await runtime.aclose()
+        await default.aclose()
+
+
+@pytest.mark.asyncio
+async def test_application_factory_activates_optional_capability_and_releases_it(tmp_path):
+    from typing import Protocol, runtime_checkable
+
+    from box_agent.agent_session import AgentSession
+    from box_agent.plugins.descriptors import PluginDescriptor, PluginScope
+    from box_agent.plugins.registries import CapabilityBinding, CapabilityPolicy
+    from box_agent.session_context import HostBindings, SessionOptions
+    from tests.test_agent_session import session_config
+
+    @runtime_checkable
+    class ExtraPort(Protocol):
+        def label(self) -> str: ...
+
+    class Extra:
+        def label(self) -> str:
+            return "host-selected"
+
+    disposed = []
+    descriptor = PluginDescriptor(
+        "test.application-extra", "1.0.0", (ExtraPort,), factory=Extra,
+        scope=PluginScope.SESSION, disposer=disposed.append,
+    )
+    runtime = assembly.create_application_runtime(
+        plugins=iter((descriptor,)),
+        bindings=iter((CapabilityBinding(ExtraPort, CapabilityPolicy.REQUIRED_SINGLE),)),
+    )
+    try:
+        session = await AgentSession.open(
+            config=session_config(tmp_path), runtime=runtime,
+            options=SessionOptions(workspace_dir=tmp_path, utility=True),
+            host=HostBindings(llm_client=DoneLLM(), tools=[], system_prompt="system"),
+        )
+        extra = session.plugin_session.activation.registry.require(ExtraPort)
+        assert extra.label() == "host-selected"
+        await session.aclose()
+        assert disposed == [extra]
+    finally:
+        await runtime.aclose()
+
+
 @pytest.mark.asyncio
 async def test_legacy_positional_session_profile_starts_without_log_restore(tmp_path):
     from box_agent.agent_session import AgentSession
